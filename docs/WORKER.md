@@ -1,8 +1,28 @@
 # 账号进程
 
-在目标 Linux 主机上为每个 Google 账号使用一个独立的普通系统用户，例如 `aas-account-a` 和 `aas-account-b`。为各用户保留独立且持久的 home、工作目录、CLI 状态和证书私钥。服务配置中的 `runAsUser` 与实际启动 worker 的 Linux 用户一致。由 systemd 启动时，使用该服务用户和它自己的 home，并在实际服务环境中验收。Sylvie 共享目录是源码检出位置，运行环境在目标服务器上配置。参见 [systemd 的 User= 和登录环境](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#User=)。
+为每个 Google 账号分配一个独立的 Linux 服务用户和持久 HOME。CLI 状态、工作目录和证书私钥按账号隔离。worker 配置中的 `runAsUser` 须与实际进程的用户一致。登录、额度探测和 ACP 都在该用户的 HOME 下运行。
 
-## Linux 安装和登录
+## 容器账号
+
+Linux Docker Engine 和 Windows Docker Desktop 都运行相同的 Linux worker 镜像。镜像内置通过官方发布包 SHA-512 校验的 agy 1.5.3。Compose 为 `worker-a`、`worker-b` 分别创建独立的 HOME 卷。登录步骤见 [Docker 部署](OPERATIONS.md#登录并启动)。
+
+登录后启动新进程确认缓存能复用。以下以账号 A 为例，账号 B 使用 `worker-b`。临时停止对应 worker 后，可以在同一个 HOME 中重新登录。
+
+~~~sh
+docker compose run --rm --no-deps -T --interactive=false worker-a agy --version
+docker compose run --rm --no-deps -T --interactive=false worker-a agy agents
+docker compose run --rm --no-deps -T --interactive=false worker-a agy -p /usage --output-format json
+~~~
+
+启动后，使用实际容器服务身份检查一次，再在重建该容器后重复执行。
+
+~~~sh
+docker compose exec -T --user aas-worker-a --workdir /var/lib/aas/worker/workspace worker-a agy -p /usage --output-format json
+~~~
+
+若无 TTY 的探测要求再次登录，先检查所用服务、HOME 卷以及 CLI 版本。CLI 的凭据读取由官方 agy 实现。复核该版本在容器中的登录持久性，再启用 DSH 代理。保留卷时应按凭据材料管控其访问权限。[Google ACP 登录命令](https://antigravity.google/docs/cli/acp/) · [Google CLI 认证说明](https://antigravity.google/docs/install?tab=cli#remote-ssh-oauth-flow)
+
+## Linux 原生安装
 
 在目标服务器用 Google 官方 Linux 安装方式安装 agy。官方安装脚本根据 CPU 架构与 libc 选择发布包，核对 SHA-512，默认安装到调用用户的 `$HOME/.local/bin/agy`。在服务配置 `agyPath` 中填写该二进制的实际绝对路径。使用由管理员维护的公共安装时，各 worker 可以指向同一个二进制，且各自仍使用自己的 home。2026-11-08 核对的官方 Linux AMD64、ARM64 和对应 musl 发布清单版本均为 `1.5.3`，部署记录以目标机的 `agy --version` 为准。
 
@@ -27,6 +47,8 @@ Linux 上 CLI 会尝试使用该用户的 Secret Service/D-Bus 安全存储。sy
 - [Google 密钥环访问排查](https://antigravity.google/docs/cli/troubleshooting#authorize-keyring-permissions)
 
 ## 每账号配置
+
+容器启动脚本在实际 worker 用户下安装内置的 [DSH 桥接代理](../deploy/docker/dsh-bridge.md)。原生部署时按下文自行配置。
 
 为每个账号复制一份 [worker 配置示例](../examples/worker.example.json)，配置 `runAsUser`、`agyPath`、`cwd` 和该 worker 的证书。`cwd` 使用该用户拥有的专用工作目录。相对路径由启动器按配置文件所在目录解析。登录、查额度和 ACP 都使用服务用户自己的默认 HOME。CLI 设置文件为 `$HOME/.gemini/antigravity-cli/settings.json`，全局自定义目录为 `$HOME/.gemini/config/`。agy 1.5.3 的 ACP 接受 `--gemini-dir`，但非交互 `/usage` 拒绝该选项。若早期 worker 配置包含 `geminiDir`，删除该字段，并以实际服务用户在默认 HOME 下完成登录和代理配置。
 
@@ -77,7 +99,3 @@ agy -p /usage --output-format json </dev/null
 - [Google ACP 参数与权限回调](https://antigravity.google/docs/ide/extensions/acp/#flags)
 - [Google CLI 权限设置](https://antigravity.google/docs/permissions/?tab=cli)
 - [Google CLI 的流式 JSON 与 init 事件](https://antigravity.google/docs/cli/headless/)
-
-## Windows 对照
-
-如果将来部署到 Windows，同样给每个账号分配独立的系统用户，使用对应的 `agy.exe`。Windows Credential Manager 的访问还取决于进程的登录会话，部署为计划任务时应在该任务实际采用的登录类型下重复上述验收。[Google 维护者对 Windows 凭据的说明](https://github.com/google-antigravity/antigravity-cli/issues/1261#issuecomment-4974500117) · [Microsoft Credential Manager 的登录会话规则](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credreadw)

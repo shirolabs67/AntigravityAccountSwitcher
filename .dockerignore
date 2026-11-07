@@ -1,0 +1,12 @@
+**
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/*.rs
+!src/router/
+!src/**/*.rs
+!deploy/
+!deploy/docker/
+!deploy/docker/entrypoint.sh
+!deploy/docker/sshd_config
+!deploy/docker/dsh-bridge.md

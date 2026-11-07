@@ -8,7 +8,7 @@ User=aas-router
 Group=aas-router
 UMask=0077
 NoNewPrivileges=true
-ExecStart=/usr/bin/node /opt/antigravity-account-switcher/dist/cli.js serve /etc/antigravity-account-switcher/router/router.json
+ExecStart=/opt/antigravity-account-switcher/bin/aas serve /etc/antigravity-account-switcher/router/router.json
 Restart=on-failure
 RestartSec=3s
 

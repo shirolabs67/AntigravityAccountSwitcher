@@ -1,8 +1,18 @@
 # Antigravity Account Switcher
 
-给多台 DeepSeek Harness（DSH）提供一个共享的 Antigravity CLI 账号入口。DSH 仍通过原插件管理聊天和工具；Linux 服务器上的路由器在每个新轮次开始前查看目标模型组的额度，并选择对应 Linux 服务用户下的官方 `agy acp`。
+给多台 DeepSeek Harness（DSH）提供一个共享的 Antigravity CLI 账号入口。Rust 服务通过同一个 `aas` 二进制运行共享路由器、SSH stdio 入口和账号 worker。DSH 插件管理聊天与工具。路由器在每个新轮次开始前查看目标模型组的额度，并选择在独立 Linux 服务用户和 HOME 下运行的官方 `agy acp`。
 
-当前状态：已实现共享路由器、SSH stdio 入口、账号 worker 和可选 DSH 代理模式，并通过模拟 ACP、回环双向 TLS 和插件与路由器联调。Linux 双账号、跨主机回调和真实 QQ 链路须分别验收后才可上线。
+## 部署
+
+Linux 使用 Docker Engine 与 Compose v2，Windows 使用 Docker Desktop 的 Linux 容器模式。运行镜像包含编译好的 `aas` 和各角色所需的运行时依赖。worker 镜像包含固定版本的官方 Linux agy。
+
+```sh
+docker compose build
+```
+
+按[部署手册](docs/OPERATIONS.md)准备证书、SSH 公钥和角色配置，再分别登录两个账号并运行 `docker compose up -d`。Docker 验收与真实双账号、跨主机回调及适用时的 QQ 验收分别记录在[实施与验收](docs/IMPLEMENTATION.md)。
+
+## 路由行为
 
 | 场景 | 预期行为 |
 | --- | --- |
@@ -22,3 +32,12 @@
 - [仓库协作约定](AGENTS.md)
 
 账号、系统凭据、SSH 密钥、实际模型配置和聊天内容留在各自主机的受保护环境。插件默认保留原直连模式；代理模式由部署者显式启用。
+
+## 开发验证
+
+```sh
+cargo build --release --locked
+cargo test --locked
+```
+
+Rust 工具链版本见 [rust-toolchain.toml](rust-toolchain.toml)。DSH 插件按其[构建说明](dsh-plugin/README.md)单独构建。

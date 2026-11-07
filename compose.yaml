@@ -1,0 +1,105 @@
+x-runtime: &runtime
+  init: true
+  read_only: true
+  pull_policy: never
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /run:mode=0755
+    - /tmp:mode=1777
+  restart: unless-stopped
+
+x-loopback: &loopback
+  <<: *runtime
+  network_mode: service:ssh
+  depends_on:
+    ssh:
+      condition: service_healthy
+      restart: true
+
+x-worker: &worker
+  <<: *loopback
+  image: antigravity-account-switcher-worker:local
+  depends_on:
+    ssh:
+      condition: service_healthy
+      restart: true
+    router:
+      condition: service_healthy
+      restart: true
+
+services:
+  ssh:
+    <<: *runtime
+    image: antigravity-account-switcher-ssh:local
+    build:
+      context: .
+      target: ssh
+    ports:
+      - "${AAS_SSH_BIND:-127.0.0.1}:${AAS_SSH_PORT:-2222}:2222"
+    healthcheck:
+      test: ["CMD", "test", "-s", "/run/sshd.pid"]
+      interval: 5s
+      timeout: 2s
+      retries: 6
+    volumes:
+      - type: bind
+        source: ${AAS_CONFIG_DIR:-./.local/docker}/ssh
+        target: /aas-input/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - ssh-host:/var/lib/aas/ssh
+
+  router:
+    <<: *loopback
+    image: antigravity-account-switcher-router:local
+    build:
+      context: .
+      target: router
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/43000"]
+      interval: 5s
+      timeout: 2s
+      retries: 6
+    volumes:
+      - type: bind
+        source: ${AAS_CONFIG_DIR:-./.local/docker}/router
+        target: /aas-input/config
+        read_only: true
+        bind:
+          create_host_path: false
+
+  worker-a:
+    <<: *worker
+    build:
+      context: .
+      target: worker
+    environment:
+      AAS_WORKER_USER: aas-worker-a
+    volumes:
+      - type: bind
+        source: ${AAS_CONFIG_DIR:-./.local/docker}/worker-account-a
+        target: /aas-input/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - worker-a-home:/var/lib/aas/worker
+
+  worker-b:
+    <<: *worker
+    environment:
+      AAS_WORKER_USER: aas-worker-b
+    volumes:
+      - type: bind
+        source: ${AAS_CONFIG_DIR:-./.local/docker}/worker-account-b
+        target: /aas-input/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - worker-b-home:/var/lib/aas/worker
+
+volumes:
+  ssh-host:
+  worker-a-home:
+  worker-b-home:
