@@ -1,6 +1,6 @@
 # 架构：C4
 
-[官方 C4 模型](https://c4model.com/diagrams) 用四种缩放层级描述静态结构；本文件另附动态和部署视图。下列命名是设计契约；源码落地后用实际路径替换计划结构。
+[官方 C4 模型](https://c4model.com/diagrams) 用四种缩放层级描述静态结构；本文件另附动态和部署视图。以下描述共享路由器、账号 worker 与客户端接入契约。Windows 双账号及跨主机行为仍按部署手册验收。
 
 ## L1 · 系统上下文
 
@@ -28,8 +28,8 @@ flowchart LR
     E["SSH 入口<br/>每条连接一个 stdio 转发进程"]
     R["共享路由器<br/>Node.js；持有顺序和租约"]
     W["账号 worker 实例<br/>Node.js；每个 Windows 用户一份"]
-    E -->|"受保护的主机内 IPC"| R
-    R -->|"受保护的主机内 IPC"| W
+    E -->|"回环 TLS，按证书认证"| R
+    R -->|"回环 TLS，按证书认证"| W
   end
   C["官方 agy<br/>每账号用户上下文"]
   A -->|"ACP v1 JSON-RPC over SSH"| E
@@ -61,34 +61,35 @@ flowchart TD
 | MCP 地址改写 | 只将允许的回环桥地址改为该实例预先分配的 Sylvie 回环地址；原路径、会话鉴权保留。DSH 使用 agy 原生会话 ID 校验工具，继续用代理会话 ID 处理 ACP。 |
 | Worker 适配器 | 额度探测与 ACP 在同一实际 Windows 身份和配置下运行；旧代次进入排空后，已有租约与回调全部结束才关闭。 |
 
-## L4 · 核心代码契约（计划）
+## L4 · 核心代码
 
 ```mermaid
 classDiagram
-  TurnCoordinator --> TurnLease : grants and releases
-  TurnCoordinator --> QuotaSelector : serializes selection
-  SessionProxy --> TurnLease : validates ownership
-  SessionProxy --> SessionBinding : maps IDs
-  TurnLease --> WorkerGeneration : pins
-  SessionBinding --> WorkerGeneration : routes to
-  class TurnLease {
-    connectionId
-    turnId
+  Router --> Lease : grants and releases
+  Router --> WorkerDirectory : probes ordered accounts
+  Connection --> Lease : validates ownership
+  Connection --> Session : maps IDs
+  Lease --> Generation : pins
+  Session --> AcpBackend : routes to
+  class Lease {
+    id
     chatKey
-    accountId
-    generationId
+    model
+    generation
   }
-  class SessionBinding {
-    connectionId
-    proxySessionId
-    nativeSessionId
+  class Session {
+    id
+    nativeId
+    lease
   }
 ```
 
-- 客户端通过拟定的 `_antigravityAccountSwitcher/acquireTurn` 申请本轮，获得仅对本连接有效的租约、账号代次和选择结果；`_antigravityAccountSwitcher/releaseTurn` 在 DSH 轮次结束后释放。连接断开会取消并清理其租约；服务端须对重复释放保持幂等。
-- `SessionBinding` 按 `(authenticatedInstance, connectionId, proxySessionId)` 查找。两侧 JSON-RPC 请求的编号空间独立，取消和权限请求使用对应方向的映射。
+- 客户端通过 `_antigravityAccountSwitcher/acquireTurn` 申请本轮，获得仅对本连接有效的租约、账号代次和选择结果；`_antigravityAccountSwitcher/releaseTurn` 在 DSH 轮次结束后释放。连接断开会取消并清理其租约；服务端须对重复释放保持幂等。
+- `Session` 按 `(authenticatedInstance, connectionId, proxySessionId)` 查找。两侧 JSON-RPC 请求的编号空间独立，取消和权限请求使用对应方向的映射。
 - ACP 规范之外的扩展必须显式协商。客户端把租约关联到会话创建和本轮请求，不把聊天历史放入额外的账号数据库。
 - 无可用且确认全部耗尽时，代理可提供不启动 agy 的合成会话，按 `agent_message_chunk`、`stopReason: end_turn` 结束；插件仍走普通回复路径，并在之后真正选中账号时重建会话。
+
+实现入口：[路由和租约](../src/router.ts) · [ACP 双向请求](../src/acp-backend.ts) · [回环 TLS 路由](../src/broker.ts) · [账号进程](../src/worker.ts)。
 
 ## 动态视图 · A 在旧号工具回调中，B 触发切号
 

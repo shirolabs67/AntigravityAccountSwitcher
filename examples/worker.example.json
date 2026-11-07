@@ -1,0 +1,15 @@
+{
+  "port": 43000,
+  "windowsUser": "REPLACE_WITH_WINDOWS_USER",
+  "tls": {
+    "key": "pki/worker.key.pem",
+    "cert": "pki/worker.cert.pem",
+    "ca": "pki/ca.cert.pem",
+    "serverName": "aas-router.local",
+    "serverFingerprint256": "REPLACE_WITH_ROUTER_SHA256"
+  },
+  "agyPath": "path/to/agy.exe",
+  "cwd": "worker-workspace",
+  "geminiDir": "worker-profile",
+  "probeTimeoutMs": 15000
+}

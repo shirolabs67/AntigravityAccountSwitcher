@@ -2,7 +2,7 @@
 
 给多台 DeepSeek Harness（DSH）提供一个共享的 Antigravity CLI 账号入口。DSH 仍通过原插件管理聊天和工具；Sylvie 上的路由器在每个新轮次开始前查看目标模型组的额度，并选择对应 Windows 用户下的官方 `agy acp`。
 
-当前状态：设计与实施准备。下面是目标行为；Windows 双账号、跨主机回调和真实 QQ 链路须分别验收后才可上线。
+当前状态：已实现共享路由器、SSH stdio 入口与 Windows 账号 worker，并通过模拟 ACP 和回环双向 TLS 测试。Windows 双账号、跨主机回调和真实 QQ 链路须分别验收后才可上线。
 
 | 场景 | 预期行为 |
 | --- | --- |
@@ -17,6 +17,7 @@
 - [架构：C4 与切号时序](docs/ARCHITECTURE.md)
 - [实施顺序、上游基线和验收](docs/IMPLEMENTATION.md)
 - [部署、双账号实测与回退](docs/OPERATIONS.md)
+- [Windows 账号进程与工具策略](docs/WORKER.md)
 - [仓库协作约定](AGENTS.md)
 
 账号、Windows 凭据、SSH 密钥、实际模型配置和聊天内容留在各自主机的受保护环境。插件默认保留原直连模式；代理模式由部署者显式启用。

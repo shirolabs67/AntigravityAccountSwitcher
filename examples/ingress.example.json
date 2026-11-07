@@ -1,0 +1,10 @@
+{
+  "port": 43000,
+  "tls": {
+    "key": "pki/ingress.key.pem",
+    "cert": "pki/ingress.cert.pem",
+    "ca": "pki/ca.cert.pem",
+    "serverName": "aas-router.local",
+    "serverFingerprint256": "REPLACE_WITH_ROUTER_SHA256"
+  }
+}

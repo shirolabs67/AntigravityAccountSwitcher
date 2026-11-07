@@ -1,0 +1,34 @@
+{
+  "port": 43000,
+  "tls": {
+    "key": "pki/router.key.pem",
+    "cert": "pki/router.cert.pem",
+    "ca": "pki/ca.cert.pem"
+  },
+  "accounts": [
+    {
+      "id": "account-a",
+      "fingerprint256": "REPLACE_WITH_WORKER_A_SHA256"
+    },
+    {
+      "id": "account-b",
+      "fingerprint256": "REPLACE_WITH_WORKER_B_SHA256"
+    }
+  ],
+  "instances": {
+    "dsh-a": {
+      "mcpPort": 43101,
+      "fingerprint256": "REPLACE_WITH_INGRESS_A_SHA256"
+    },
+    "dsh-b": {
+      "mcpPort": 43102,
+      "fingerprint256": "REPLACE_WITH_INGRESS_B_SHA256"
+    }
+  },
+  "modelGroups": {
+    "REPLACE_WITH_DSH_MODEL_ID": "Gemini Models",
+    "REPLACE_WITH_OTHER_DSH_MODEL_ID": "Claude and GPT models"
+  },
+  "threshold": 0.05,
+  "exhaustedMessage": "余额不足"
+}
