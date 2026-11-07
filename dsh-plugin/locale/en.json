@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Antigravity Model Provider (ACP)",
+    "description": "DeepSeek Harness primary model provider driving the local official Antigravity CLI (`agy acp`) over ACP v1 with DSH-owned tools; Gemini and Claude models with per-model context and reasoning efforts."
+  }
+}

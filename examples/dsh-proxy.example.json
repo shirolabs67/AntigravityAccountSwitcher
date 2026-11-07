@@ -1,0 +1,10 @@
+{
+  "proxy": {
+    "host": "ssh.example.invalid",
+    "user": "aas-ingress-a",
+    "port": 2222,
+    "remotePort": 43101,
+    "identityFile": "<absolute path to instance SSH private key>",
+    "knownHostsFile": "<absolute path to pinned known_hosts>"
+  }
+}

@@ -14,7 +14,7 @@ export type BrokerConfig = {
 };
 export type ClientConfig = { tls: ConnectionOptions };
 export type WorkerConfig = ClientConfig & {
-  windowsUser: string;
+  runAsUser: string;
   agyPath: string;
   cwd: string;
   geminiDir?: string;
@@ -157,7 +157,7 @@ export async function workerConfig(path: string): Promise<WorkerConfig> {
   if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 100 || timeout > 30_000) return invalid('probe_timeout');
   return {
     ...await makeClient(raw, directory),
-    windowsUser: str(raw.windowsUser, 'windows_user', 128),
+    runAsUser: str(raw.runAsUser, 'run_as_user', 128),
     agyPath: local('agyPath'),
     cwd: local('cwd'),
     geminiDir: raw.geminiDir === undefined ? undefined : local('geminiDir'),

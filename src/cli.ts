@@ -32,9 +32,11 @@ function terminate(stop: () => void): void {
 
 async function worker(configPath: string): Promise<void> {
   const config = await workerConfig(configPath);
-  if (process.platform !== 'win32' || userInfo().username.toLowerCase() !== config.windowsUser.toLowerCase()) {
-    throw new PeerError('wrong_windows_user');
-  }
+  const actual = userInfo().username;
+  const sameUser = process.platform === 'win32'
+    ? actual.toLowerCase() === config.runAsUser.toLowerCase()
+    : actual === config.runAsUser;
+  if (!sameUser || process.getuid?.() === 0) throw new PeerError('wrong_worker_user');
   try { await validateWorkerWorkspace(config.cwd); }
   catch { throw new PeerError('agent_missing'); }
   const runtime = new AccountWorker(config);
@@ -115,7 +117,7 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       stop();
     });
-    server.once('listening', () => process.stderr.write('Router listening on Windows loopback.\n'));
+    server.once('listening', () => process.stderr.write('Router listening on loopback.\n'));
     terminate(stop);
   } else if (mode === 'worker') await worker(file);
   else await ingress(file);

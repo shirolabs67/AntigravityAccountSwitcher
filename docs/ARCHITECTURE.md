@@ -1,6 +1,6 @@
 # 架构：C4
 
-[官方 C4 模型](https://c4model.com/diagrams) 用四种缩放层级描述静态结构；本文件另附动态和部署视图。以下描述共享路由器、账号 worker 与客户端接入契约。Windows 双账号及跨主机行为仍按部署手册验收。
+[官方 C4 模型](https://c4model.com/diagrams) 用四种缩放层级描述静态结构；本文件另附动态和部署视图。以下描述共享路由器、账号 worker 与客户端接入契约。Linux 双账号及跨主机行为仍按部署手册验收。
 
 ## L1 · 系统上下文
 
@@ -27,7 +27,7 @@ flowchart LR
   subgraph S["Antigravity Account Switcher"]
     E["SSH 入口<br/>每条连接一个 stdio 转发进程"]
     R["共享路由器<br/>Node.js；持有顺序和租约"]
-    W["账号 worker 实例<br/>Node.js；每个 Windows 用户一份"]
+    W["账号 worker 实例<br/>Node.js；每个 Linux 服务用户一份"]
     E -->|"回环 TLS，按证书认证"| R
     R -->|"回环 TLS，按证书认证"| W
   end
@@ -50,7 +50,7 @@ flowchart TD
   A --> B
   A --> M["MCP 地址改写<br/>校验桥类型和本地回环地址"]
   A --> W
-  W --> S["账号进程<br/>在对应 Windows 身份下运行 agy"]
+  W --> S["账号进程<br/>在对应 Linux 服务身份下运行 agy"]
 ```
 
 | 组件 | 约束 |
@@ -58,8 +58,8 @@ flowchart TD
 | 额度选择器 | 显式匹配模型组。两个窗口都要返回有效的 0–1 比例，`min(weekly, fiveHour) >= threshold` 才可用；探测失败不能当作低额度。整圈无可用且至少一次探测失败时，报探测错误。 |
 | 轮次协调器 | 同一连接内，同一聊天与用途只有一个活跃租约。更新共享当前账号和分配租约是同一次决定；租约持有具体账号进程代次，随后其他聊天切号不改变它。 |
 | ACP 会话代理 | 保存代理会话与原生会话的绑定。双向 RPC 分别转换请求 ID，转换引用请求的取消消息；权限结果只可回到发起连接和会话。 |
-| MCP 地址改写 | 只将允许的回环桥地址改为该实例预先分配的 Sylvie 回环地址；原路径、会话鉴权保留。DSH 使用 agy 原生会话 ID 校验工具，继续用代理会话 ID 处理 ACP。 |
-| Worker 适配器 | 额度探测与 ACP 在同一实际 Windows 身份和配置下运行；旧代次进入排空后，已有租约与回调全部结束才关闭。 |
+| MCP 地址改写 | 只将允许的回环桥地址改为该实例预先分配的 Linux 服务器回环地址；原路径、会话鉴权保留。DSH 使用 agy 原生会话 ID 校验工具，继续用代理会话 ID 处理 ACP。 |
+| Worker 适配器 | 额度探测与 ACP 在同一实际 Linux 服务身份和配置下运行；旧代次进入排空后，已有租约与回调全部结束才关闭。 |
 
 ## L4 · 核心代码
 
@@ -116,7 +116,7 @@ sequenceDiagram
   A->>Y: 通过路由器，用 A 自己的历史重建会话
 ```
 
-## 部署视图 · Sylvie 与两台 DSH
+## 部署视图 · Linux 服务器与两台 DSH
 
 ```mermaid
 flowchart LR
@@ -126,13 +126,13 @@ flowchart LR
   subgraph DB["DSH 主机 B"]
     B["DSH + 插件<br/>SSH 密钥 B + 本地 MCP"]
   end
-  subgraph H["Sylvie · Windows 主机"]
+  subgraph H["目标 Linux 主机"]
     SSH["OpenSSH Server<br/>密钥绑定实例及回环端口"]
     R["共享路由器"]
-    subgraph UA["独立 Windows 用户 A"]
+    subgraph UA["独立 Linux 服务用户 A"]
       WA["Worker A + 官方 agy<br/>配置与凭据 A"]
     end
-    subgraph UB["独立 Windows 用户 B"]
+    subgraph UB["独立 Linux 服务用户 B"]
       WB["Worker B + 官方 agy<br/>配置与凭据 B"]
     end
     SSH --> R
