@@ -1,0 +1,20 @@
+{
+  "name": "antigravity-account-switcher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ACP v1 quota-aware Antigravity account router for DSH",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:integration": "node --test tests/plugin-router.integration.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "~5.9.3"
+  }
+}

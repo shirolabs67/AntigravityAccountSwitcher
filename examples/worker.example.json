@@ -1,0 +1,14 @@
+{
+  "port": 43000,
+  "tls": {
+    "key": "pki/worker.key.pem",
+    "cert": "pki/worker.cert.pem",
+    "ca": "pki/ca.cert.pem",
+    "serverName": "aas-router.local",
+    "serverFingerprint256": "REPLACE_WITH_ROUTER_SHA256"
+  },
+  "agyPath": "/path/to/agy",
+  "cwd": "/var/lib/aas-account-a/workspace",
+  "probeTimeoutMs": 15000,
+  "runAsUser": "aas-account-a"
+}

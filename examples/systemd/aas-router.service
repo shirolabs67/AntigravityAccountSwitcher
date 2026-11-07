@@ -1,0 +1,16 @@
+[Unit]
+Description=Antigravity Account Switcher router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=aas-router
+Group=aas-router
+UMask=0077
+NoNewPrivileges=true
+ExecStart=/usr/bin/node /opt/antigravity-account-switcher/dist/cli.js serve /etc/antigravity-account-switcher/router/router.json
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
