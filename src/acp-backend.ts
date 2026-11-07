@@ -27,6 +27,9 @@ export class RpcFault extends Error {
 }
 
 export class WorkerDisconnected extends Error {}
+export class WorkerRequestTimeout extends Error {}
+
+const MAX_LATE_REPLIES = 64;
 
 interface Pending {
   resolve(value: unknown): void;
@@ -41,6 +44,7 @@ export class AcpBackend {
   #sequence = 0;
   #closed = false;
   #pending = new Map<number, Pending>();
+  #lateResults = new Map<number, (result: unknown) => void>();
 
   constructor(
     private readonly stream: WorkerStream,
@@ -55,7 +59,14 @@ export class AcpBackend {
       }
       if (typeof frame.id !== 'number') return;
       const pending = this.#pending.get(frame.id);
-      if (!pending) return;
+      if (!pending) {
+        const onLateResult = this.#lateResults.get(frame.id);
+        this.#lateResults.delete(frame.id);
+        if (onLateResult && !Object.hasOwn(frame, 'error') && Object.hasOwn(frame, 'result')) {
+          onLateResult(frame.result);
+        }
+        return;
+      }
       this.#remove(frame.id, pending);
       const error = object(frame.error);
       if (error && typeof error.code === 'number' && typeof error.message === 'string') {
@@ -73,7 +84,10 @@ export class AcpBackend {
     return this.#closed;
   }
 
-  request(method: string, params: JsonObject, signal?: AbortSignal, timeoutMs?: number): Promise<unknown> {
+  request(
+    method: string, params: JsonObject, signal?: AbortSignal, timeoutMs?: number,
+    onLateResult?: (result: unknown) => void,
+  ): Promise<unknown> {
     if (this.#closed) return Promise.reject(new WorkerDisconnected());
     if (signal?.aborted) return Promise.reject(new RpcFault(-32800, 'Request cancelled'));
     return new Promise((resolve, reject) => {
@@ -84,8 +98,13 @@ export class AcpBackend {
       if (timeoutMs !== undefined) {
         pending.timer = setTimeout(() => {
           this.#remove(id, pending);
-          reject(new WorkerDisconnected());
-          this.close();
+          if (onLateResult) {
+            const oldest = this.#lateResults.keys().next().value;
+            if (this.#lateResults.size >= MAX_LATE_REPLIES && oldest !== undefined) this.#lateResults.delete(oldest);
+            this.#lateResults.set(id, onLateResult);
+          }
+          this.notify('$/cancel_request', { requestId: id });
+          reject(new WorkerRequestTimeout());
         }, timeoutMs);
         pending.timer.unref();
       }
@@ -126,6 +145,7 @@ export class AcpBackend {
   #end(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#lateResults.clear();
     for (const [id, pending] of this.#pending) {
       this.#remove(id, pending);
       pending.reject(new WorkerDisconnected());

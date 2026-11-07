@@ -17,6 +17,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 
 class FakeWorker {
   closed = false;
+  pauseSessionNew = false;
   frames = [];
   receive = () => {};
   exit = () => {};
@@ -33,7 +34,7 @@ class FakeWorker {
     this.frames.push(frame);
     if (frame.method === 'initialize') {
       this.reply(frame.id, { protocolVersion: 1 });
-    } else if (frame.method === 'session/new') {
+    } else if (frame.method === 'session/new' && !this.pauseSessionNew) {
       this.reply(frame.id, { sessionId: NATIVE_SESSION, configOptions: [], _meta: { example: true } });
     } else if (frame.method === 'session/close') {
       this.reply(frame.id, {});
@@ -292,4 +293,71 @@ test('cancels queued acquisition without reserving an orphan chat lease', async 
   assert.equal(lease.accountId, 'a');
   await dsh.release(lease);
   dsh.connection.close();
+});
+
+test('an unanswered native session setup releases its chat without interrupting another prompt', { timeout: 3_000 }, async t => {
+  const h = harness();
+  const a = client(h.router, 'dshA');
+  t.after(() => a.connection.close());
+  await a.initialize();
+  const live = await a.acquire('live');
+  const session = await a.open(live);
+  const [worker] = h.streams;
+  const inFlight = a.prompt(live, session.sessionId);
+  const nativePrompt = worker.last('session/prompt');
+
+  const stale = await a.acquire('stale');
+  worker.pauseSessionNew = true;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const opening = a.request('session/new', {
+    cwd: '/original', mcpServers: [], _meta: leaseMeta(stale),
+  });
+  await tick();
+  const nativeOpening = worker.last('session/new');
+  assert.equal(nativeOpening.params.cwd, '/original');
+  await a.release(stale);
+  const nextTurn = a.acquire('stale');
+  t.mock.timers.tick(100_000);
+
+  assert.equal((await opening).error.data.kind, 'stale_route');
+  assert.equal(worker.last('$/cancel_request').params.requestId, nativeOpening.id);
+  const next = await nextTurn;
+  assert.equal(next.accountId, 'a');
+  assert.equal(worker.closed, false);
+
+  worker.reply(nativeOpening.id, { sessionId: 'late-native-id' });
+  assert.equal(worker.last('session/close').params.sessionId, 'late-native-id');
+  worker.reply(nativePrompt.id, { stopReason: 'end_turn' });
+  assert.deepEqual(await inFlight, { stopReason: 'end_turn' });
+  assert.equal(worker.frames.filter(f => f.method === 'session/prompt').length, 1);
+  await a.release(live);
+  await a.release(next);
+});
+
+test('a timed-out model configuration detaches the old session before the next turn', { timeout: 3_000 }, async t => {
+  const h = harness();
+  const a = client(h.router, 'dshA');
+  t.after(() => a.connection.close());
+  await a.initialize();
+  const turn = await a.acquire();
+  const session = await a.open(turn);
+  const [worker] = h.streams;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const config = a.request('session/set_config_option', {
+    sessionId: session.sessionId, configId: 'model', value: MODEL, _meta: leaseMeta(turn),
+  });
+  const nativeConfig = worker.last('session/set_config_option');
+  t.mock.timers.tick(60_000);
+  assert.equal((await config).error.data.kind, 'stale_route');
+  assert.equal(worker.last('$/cancel_request').params.requestId, nativeConfig.id);
+  assert.equal(worker.last('session/close').params.sessionId, NATIVE_SESSION);
+  await a.release(turn);
+  const next = await a.acquire();
+  assert.notEqual(next.generationId, turn.generationId);
+  const retryOldSession = await a.request('session/prompt', {
+    sessionId: session.sessionId, prompt: [], _meta: leaseMeta(next),
+  });
+  assert.equal(retryOldSession.error.data.kind, 'stale_route');
+  assert.equal(worker.frames.some(f => f.method === 'session/prompt'), false);
+  await a.release(next);
 });

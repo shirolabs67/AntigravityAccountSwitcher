@@ -7,6 +7,8 @@ Sylvie 的共享目录是开发检出。服务部署时从 Git 拉取到目标 L
 在服务器或同平台构建环境安装 Node.js `>=22.19`、npm 和 OpenSSL。安装目标架构的 [官方 Antigravity CLI](https://antigravity.google/docs/install?tab=cli)。核对服务器上的 `agy --version`、`agy acp --help` 和 OpenSSH 版本，以及两个 DSH 主机的实际 DSH 与 SSH 客户端版本。当前插件兼容测试使用 DSH 0.2.1-rc.5；Windows 开发检出中的 agy 1.5.3 与 [Google 发布清单](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/windows_amd64.json) 校验一致，Linux 安装须重新核对。
 
 ~~~sh
+git clone --branch codex/initialize-account-switcher --single-branch https://github.com/shirolabs67/AntigravityAccountSwitcher.git
+cd AntigravityAccountSwitcher
 npm ci
 npm test
 npm run build
@@ -66,7 +68,7 @@ ACP 通过标准输入输出，MCP 通过反向回环转发。验证实例无法
 ## 两账号、两 DSH 的实机验收
 
 1. 确认两个 Linux worker 能各自运行真实 `/usage`、初始化 ACP 并回复，第二次 Google 登录不会改变第一个 worker 的身份。两台 DSH 各发一条含不同测试标记的消息并调用测试 MCP 工具，检查流式回复、权限和回调都归原实例。
-2. 让聊天甲在账号 A 的工具调用上等待，再让第二台 DSH 的聊天乙触发 A 低于阈值且 B 达标的场景。必要时在隔离测试环境根据实测额度调阈值。乙应立即由 B 回复；甲的工具回填和续写仍由 A 完成。甲的下一条消息由 B 带着甲自己的历史生成；旧代次应在所有轮次与回调结束后退出。
+2. 让聊天甲在账号 A 的工具调用上等待，再让第二台 DSH 的聊天乙触发 A 低于阈值且 B 达标的场景。必要时在隔离测试环境根据实测额度调阈值。乙应立即由 B 回复；甲的工具回填和续写仍由 A 完成。甲的下一条消息由 B 带着甲自己的历史生成；旧代次的 `agy acp` 子进程应在所有轮次与回调结束后退出。
 3. 在提交 prompt 后断开测试连接。用户应看到结果未知，工具只执行一次，重连只承接新请求。若此 DSH 接入 QQ，从原聊天发一条测试消息并确认原聊天收到回复。日志只记录测试代号、版本和结果，避免写入凭据或聊天正文。
 
 ## 回退

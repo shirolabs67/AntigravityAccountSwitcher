@@ -28,14 +28,14 @@
 | 工具及权限 | 为每次开会话保留代理 ACP session ID 与原生 agy session ID。代理重写 ACP 请求和更新中的 session ID，MCP 请求中的原生 ID 供插件核验。MCP URL 只替换为配置允许的 Linux 服务器回环端口，保留租户路径及 bearer，校验该租户与原生会话的绑定。 |
 | 工具回填及续写 | 成功回填继续原租约。无论是恢复仍挂起的 prompt、提交工具结果续写，还是处理 `max_tokens` 的自动续写，均沿用原账号。 |
 | 整圈额度不足 | 路由器将配置文字作为正常 ACP 文本更新和 `end_turn` 返回，默认 `余额不足`，且该回复无需调用 agy 生成。插件在下次额度恢复时按 DSH 历史重建上下文。 |
-| 结束与清理 | 终止该 DSH 回合后调用 `_antigravityAccountSwitcher/releaseTurn`。未正常释放的租约随连接清理，仍在执行的 prompt 与工具回调先取消并收尾。旧 worker 在所有已接纳回合与挂起回调结束后退出。 |
+| 结束与清理 | 终止该 DSH 回合后调用 `_antigravityAccountSwitcher/releaseTurn`。未正常释放的租约随连接清理，仍在执行的 prompt 与工具回调先取消并收尾。旧代次的 `agy acp` 子进程在已接纳回合与挂起回调结束后退出。账号 worker 继续在线，以便查额度和重新启动子进程。 |
 | 传输中断 | 已提交 prompt 的结果可能未知。插件结束该回合并向 DSH 报告失败，禁止自动重发该回合。DSH 默认会重试 `TRANSPORT`，所以代理模式须验证提交后失败类别及 provider 重试策略，使重试插件也能遵守回合边界。 |
 
 重放的数据源始终是 DSH 持有的对话历史。账号切换后复用既有转录与附件处理规则，历史按上游重放预算截取并保留最新输入。插件与代理用 ACP `_meta` 传递扩展信息，并在初始化能力中声明扩展。代理专用元数据在转发给 agy 前剥离，保留 agy 使用的系统提示元数据。[ACP 扩展](https://agentclientprotocol.com/protocol/v1/extensibility) · [回合入口](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/src/runtime.ts#L290-L367) · [历史重建](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/src/runtime.ts#L648-L733) · [MCP 会话核验](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/src/runtime.ts#L889-L898) · [DSH 重试策略](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-retry/README.md#configuration)
 
 ## P3 验证、切换与回退
 
-已通过根目录 TypeScript 构建和 11 项路由、worker、双向 TLS 测试；插件的构建、类型检查和 53 项测试通过。在分别构建根目录与插件后，使用 `npm run test:integration` 运行实际插件代码与路由器的联调，模拟两台 DSH 使用相同聊天 ID 切号、重建隔离和额度不足。上述结果未使用真实账号。
+已通过根目录 TypeScript 构建和 13 项路由、worker、双向 TLS 测试；插件的构建、类型检查和 53 项测试通过。在分别构建根目录与插件后，使用 `npm run test:integration` 运行实际插件代码与路由器的联调，模拟两台 DSH 使用相同聊天 ID 切号、重建隔离和额度不足。上述结果未使用真实账号。会话创建和配置超时后，同一聊天可以重新开始，其他已经提交的轮次继续运行。另在本地 Ubuntu 的隔离环境用真实 OpenSSH 和两个 DSH 插件连接运行了 MCP 联调。OpenSSH 拒绝跨实例绑定端口，B 在 A 等工具结果时完成新轮次，A 通过原隧道收到一次工具结果，随后旧子进程退出，下一轮只重放 A 的历史。此项使用模拟 agy 和额度。
 
 先使用模拟 ACP worker 验证路由器。插件改动通过上游 `npm run build`、`npm run typecheck`、`npm test`，并将代理回归场景接入现有假 agy 测试。构建需 TypeScript 和 DSH peer 声明，可通过 `DSH_CHECKOUT` 指向已构建的 DSH 源码检出。实际接入再使用两台 DSH 主机和两个真实账号验收。[上游构建脚本](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/scripts/build.mjs) · [上游运行时测试](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/tests/runtime.test.mjs)
 
@@ -45,7 +45,7 @@
 | 轮询与恢复 | 模拟 | 当前账号不达标时按顺序接续，最多探测一圈。先前跳过的账号在后续绕回且达标时可重新接手。并发准入后每个回合的租约仍固定在各自选定账号。 |
 | 固定回复与未知 | 模拟 | 整圈确认不足时收到配置文字和正常终止，默认文字为 `余额不足`。没有可用账号且出现登录失败、超时或字段缺失时收到诊断错误。 |
 | 多 DSH 会话隔离 | 模拟、两台 DSH | 两客户端用相同 RPC ID、同名会话关联，均只收到所属流、取消和权限回调。错用其他实例或会话的 MCP 凭据被拒绝。 |
-| 工具等待期间换号 | 模拟、两账号两台 DSH | 让账号 A 上的聊天停在工具调用，令下一次探测判定 A 低于阈值。另一聊天立即由 B 生成。同一聊天等待 A 完成工具回填与续写后，下一条消息由 B 带着该聊天原上下文生成。A 的 worker 关闭时其已开始回合和工具回调全部结束。 |
+| 工具等待期间换号 | 模拟、两账号两台 DSH | 让账号 A 上的聊天停在工具调用，令下一次探测判定 A 低于阈值。另一聊天立即由 B 生成。同一聊天等待 A 完成工具回填与续写后，下一条消息由 B 带着该聊天原上下文生成。A 的旧 `agy acp` 子进程退出时，已开始的回合和工具回调全部结束。 |
 | 重建与恢复 | 模拟、实机 | 重建只使用该聊天的 DSH 历史，保留模型、思考档位、MCP 与附件。账户恢复后能接在先前的固定回复后继续。 |
 | 已提交后断链 | 模拟、实机 | 发送 prompt 后切断链路，用户可见该轮失败。在启用 DSH 重试插件的配置下，工具执行次数仍为一次。后续新消息可重新建立会话。 |
 | 直连回归与回退 | 模拟、实机 | 可关闭代理模式恢复原配置，用相同 DSH 入口验证直连回复。 |

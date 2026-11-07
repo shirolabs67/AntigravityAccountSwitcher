@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { AcpBackend, object, rpcId, RpcFault, WorkerDisconnected } from './acp-backend.js';
+import { AcpBackend, object, rpcId, RpcFault, WorkerDisconnected, WorkerRequestTimeout } from './acp-backend.js';
 import type { RpcId } from './acp-backend.js';
 import type { JsonObject, RouterConfig, RouterConnection, WorkerDirectory } from './router-types.js';
 
@@ -8,6 +8,9 @@ const ACQUIRE = '_' + EXTENSION + '/acquireTurn';
 const RELEASE = '_' + EXTENSION + '/releaseTurn';
 const ACQUIRE_DEADLINE_MS = 110_000;
 const INITIALIZE_DEADLINE_MS = 10_000;
+const SESSION_NEW_DEADLINE_MS = 90_000;
+const SESSION_CONFIG_DEADLINE_MS = 55_000;
+const SESSION_CLOSE_DEADLINE_MS = 10_000;
 const DISCONNECT_GRACE_MS = 30_000;
 const CANCELLED_PERMISSION = { result: { outcome: { outcome: 'cancelled' } } };
 
@@ -443,7 +446,13 @@ class Connection implements RouterConnection {
       const backend = await slot.promise;
       checkCancelled(signal);
       if (lease.releasing) throw stale('Turn lease is no longer active');
-      const result = object(await backend.request('session/new', { ...withoutExtension(params), mcpServers: servers }, signal));
+      const result = object(await backend.request(
+        'session/new', { ...withoutExtension(params), mcpServers: servers }, signal, SESSION_NEW_DEADLINE_MS,
+        late => {
+          const id = object(late)?.sessionId;
+          if (typeof id === 'string' && id && !slot.sessions.has(id)) this.#discardNativeSession(backend, id);
+        },
+      ));
       const nativeId = result?.sessionId;
       if (!result || typeof nativeId !== 'string' || !nativeId || slot.sessions.has(nativeId)) {
         throw new RpcFault(-32603, 'Invalid native ACP session ID');
@@ -455,7 +464,7 @@ class Connection implements RouterConnection {
         this.#detach(session);
         // New session reached the worker after local cancellation. Request its
         // cleanup on the same stream without exposing its ID.
-        void backend.request('session/close', { sessionId: nativeId }).catch(() => {});
+        this.#discardNativeSession(backend, nativeId);
         throw cancelled();
       }
       return {
@@ -463,6 +472,7 @@ class Connection implements RouterConnection {
         _meta: { ...object(result._meta), [EXTENSION]: { nativeSessionId: nativeId } },
       };
     } catch (error) {
+      if (error instanceof WorkerRequestTimeout) throw stale('Account worker timed out during ACP session setup');
       if (error instanceof WorkerDisconnected) throw stale('Account worker disconnected before session setup finished');
       throw error;
     } finally {
@@ -520,12 +530,17 @@ class Connection implements RouterConnection {
     this.#detach(session);
     if (!session.slot?.backend || session.slot.backend.closed) return {};
     try {
-      await session.slot.backend.request('session/close', { sessionId: session.nativeId }, signal);
+      await session.slot.backend.request('session/close', { sessionId: session.nativeId }, signal, SESSION_CLOSE_DEADLINE_MS);
     } catch (error) {
       // Local state is detached even when the installed agy lacks session/close.
-      if (!(error instanceof WorkerDisconnected) && !(error instanceof RpcFault && error.code === -32601)) throw error;
+      if (!(error instanceof WorkerDisconnected || error instanceof WorkerRequestTimeout) &&
+          !(error instanceof RpcFault && error.code === -32601)) throw error;
     }
     return {};
+  }
+
+  #discardNativeSession(backend: AcpBackend, nativeId: string): void {
+    void backend.request('session/close', { sessionId: nativeId }, undefined, SESSION_CLOSE_DEADLINE_MS).catch(() => {});
   }
 
   async #sessionRequest(method: string, params: JsonObject, signal: AbortSignal): Promise<unknown> {
@@ -557,10 +572,20 @@ class Connection implements RouterConnection {
     lease.operations++;
     session.prompting = prompting;
     try {
-      const result = await backend.request(method, { ...withoutExtension(params), sessionId: session.nativeId }, signal);
+      const result = await backend.request(
+        method, { ...withoutExtension(params), sessionId: session.nativeId }, signal,
+        prompting ? undefined : SESSION_CONFIG_DEADLINE_MS,
+      );
       if (!prompting) this.#observeModel(session, object(result) ?? {});
       return result;
     } catch (error) {
+      if (error instanceof WorkerRequestTimeout) {
+        // A late model change must not apply to a session reused by another turn.
+        this.#detach(session);
+        this.#discardNativeSession(backend, session.nativeId);
+        if (lease.generation) this.#revisions.set(lease.generation, randomUUID());
+        throw stale('Account worker timed out configuring the ACP session');
+      }
       if (prompting && (error instanceof WorkerDisconnected ||
           (error instanceof RpcFault && error.code === -32603 && backend.closed))) {
         throw new RpcFault(-32041, 'Account worker disconnected after prompt submission', { kind: 'submission_unknown' });
