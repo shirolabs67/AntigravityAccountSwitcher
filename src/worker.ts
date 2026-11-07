@@ -1,16 +1,17 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { open } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import type { JsonObject } from './router-types.js'
 import { Lines, object } from './wire.js'
 
 const QUOTA_OUTPUT_LIMIT = 1024 * 1024
 const CLOSE_GRACE_MS = 2_000
+const INTERACTIVE_AUTH_REQUIRED = /(?:authentication required\.\s+please visit the url to log in|secret keyring is locked)/i
 
 export interface AccountWorkerOptions {
   agyPath: string
   cwd: string
-  geminiDir?: string
   probeTimeoutMs?: number
 }
 
@@ -29,7 +30,7 @@ type WorkerErrorCode =
   | 'stream-unavailable'
 
 const ERROR_MESSAGES: Record<WorkerErrorCode, string> = {
-  'agent-missing': 'The account worker needs a readable dsh-bridge agent in its workspace.',
+  'agent-missing': 'The account worker needs a readable dsh-bridge agent in its CLI profile.',
   'quota-auth': 'The account worker needs Antigravity authentication.',
   'quota-timeout': 'The account worker quota probe timed out.',
   'quota-invalid': 'The account worker returned unrecognized quota data.',
@@ -46,9 +47,9 @@ export class WorkerError extends Error {
 }
 
 /** Blocks startup when the dedicated ACP agent has not been provisioned. */
-export async function validateWorkerWorkspace(cwd: string): Promise<void> {
+export async function validateWorkerAgent(profileDir = join(homedir(), '.gemini')): Promise<void> {
   try {
-    const file = await open(join(cwd, '.agents', 'agents', 'dsh-bridge.md'), 'r')
+    const file = await open(join(profileDir, 'config', 'agents', 'dsh-bridge.md'), 'r')
     try {
       const info = await file.stat()
       if (info.isFile() && info.size > 0) return
@@ -69,7 +70,7 @@ type WorkerSpawner = (
 
 function needsLogin(value: unknown): boolean {
   return typeof value === 'string'
-    && /\b(?:authentication required|not (?:logged|signed) in|(?:sign[- ]in|log[- ]?in) required|invalid_grant|unauthenticated|401\s+unauthorized)\b/i.test(value)
+    && /\b(?:authentication required|not (?:logged|signed) in|(?:sign[- ]in|log[- ]?in) required|invalid_grant|unauthenticated|401\s+unauthorized|secret keyring is locked)\b/i.test(value)
 }
 
 function parseQuota(output: string, groupId: string): Quota {
@@ -122,11 +123,10 @@ function stop(child: ChildProcessWithoutNullStreams): void {
   child.once('close', () => clearTimeout(timer))
 }
 
-/** Runs only within the Windows user/profile that started this worker. */
+/** Runs agy under the OS user and profile that started this worker. */
 export class AccountWorker {
   private readonly streams = new Map<string, Lines>()
   private readonly probes = new Set<() => void>()
-  private readonly profileArgs: string[]
   private readonly probeTimeoutMs: number
   private readonly agyPath: string
   private readonly cwd: string
@@ -135,13 +135,11 @@ export class AccountWorker {
     options: AccountWorkerOptions,
     private readonly spawnChild: WorkerSpawner = spawn,
   ) {
-    if (!isAbsolute(options.agyPath) || !isAbsolute(options.cwd)
-      || (options.geminiDir !== undefined && !isAbsolute(options.geminiDir))) {
+    if (!isAbsolute(options.agyPath) || !isAbsolute(options.cwd)) {
       throw new TypeError('Account worker paths must be absolute.')
     }
     this.agyPath = options.agyPath
     this.cwd = options.cwd
-    this.profileArgs = options.geminiDir === undefined ? [] : ['--gemini-dir', options.geminiDir]
     this.probeTimeoutMs = options.probeTimeoutMs ?? 45_000
     if (!Number.isSafeInteger(this.probeTimeoutMs) || this.probeTimeoutMs < 1 || this.probeTimeoutMs > 120_000) {
       throw new TypeError('Account worker probe timeout must be 1–120000 ms.')
@@ -185,7 +183,17 @@ export class AccountWorker {
         else into.push(chunk)
       }
       child.stdout.on('data', read(output))
-      child.stderr.on('data', read(diagnostics))
+      const readDiagnostic = read(diagnostics)
+      let previousDiagnostic = ''
+      child.stderr.on('data', (chunk: Buffer) => {
+        readDiagnostic(chunk)
+        if (done) return
+        // Real agy can wait for OAuth even with closed stdin. Stop at its
+        // login prompt, before the quota timeout hides the auth failure.
+        const text = previousDiagnostic + chunk.toString('utf8')
+        if (INTERACTIVE_AUTH_REQUIRED.test(text)) finish(new WorkerError('quota-auth'))
+        else previousDiagnostic = text.slice(-128)
+      })
       child.on('error', abort)
       child.stdin.on('error', abort)
       child.stdout.on('error', abort)
@@ -262,7 +270,7 @@ export class AccountWorker {
   }
 
   private start(args: readonly string[]): ChildProcessWithoutNullStreams {
-    return this.spawnChild(this.agyPath, [...args, ...this.profileArgs], {
+    return this.spawnChild(this.agyPath, args, {
       cwd: this.cwd,
       windowsHide: true,
       shell: false,

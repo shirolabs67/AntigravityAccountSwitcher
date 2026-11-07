@@ -35,7 +35,7 @@
 
 ## P3 验证、切换与回退
 
-已通过根目录 TypeScript 构建和 13 项路由、worker、双向 TLS 测试；插件的构建、类型检查和 53 项测试通过。在分别构建根目录与插件后，使用 `npm run test:integration` 运行实际插件代码与路由器的联调，模拟两台 DSH 使用相同聊天 ID 切号、重建隔离和额度不足。上述结果未使用真实账号。会话创建和配置超时后，同一聊天可以重新开始，其他已经提交的轮次继续运行。另在本地 Ubuntu 的隔离环境用真实 OpenSSH 和两个 DSH 插件连接运行了 MCP 联调。OpenSSH 拒绝跨实例绑定端口，B 在 A 等工具结果时完成新轮次，A 通过原隧道收到一次工具结果，随后旧子进程退出，下一轮只重放 A 的历史。此项使用模拟 agy 和额度。
+已通过根目录 TypeScript 构建和 14 项路由、worker、双向 TLS 测试；插件的构建、类型检查和 54 项测试通过。在分别构建根目录与插件后，使用 `npm run test:integration` 运行实际插件代码与路由器的联调，模拟两台 DSH 使用相同聊天 ID 切号、重建隔离和额度不足。上述结果未使用真实账号。会话创建和配置超时后，同一聊天可以重新开始，其他已经提交的轮次继续运行。另在本地 Ubuntu 的隔离环境用真实 OpenSSH 和两个 DSH 插件连接运行了 MCP 联调。OpenSSH 拒绝跨实例绑定端口，B 在 A 等工具结果时完成新轮次，A 通过原隧道收到一次工具结果，随后旧子进程退出，下一轮只重放 A 的历史。此项使用模拟 agy 和额度。另以校验过的官方 Linux agy 1.5.3 在空白 HOME 验证了全局代理发现、ACP v1 初始化及未登录的 `/usage` 分类。没有在此探测登录或发起模型生成。
 
 先使用模拟 ACP worker 验证路由器。插件改动通过上游 `npm run build`、`npm run typecheck`、`npm test`，并将代理回归场景接入现有假 agy 测试。构建需 TypeScript 和 DSH peer 声明，可通过 `DSH_CHECKOUT` 指向已构建的 DSH 源码检出。实际接入再使用两台 DSH 主机和两个真实账号验收。[上游构建脚本](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/scripts/build.mjs) · [上游运行时测试](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/tests/runtime.test.mjs)
 

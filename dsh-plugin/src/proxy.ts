@@ -126,12 +126,62 @@ export function submissionUnknown(cause: unknown): LlmError {
   return new LlmError('Antigravity proxy disconnected after submitting this turn. Its result is unknown.', 'SUBMISSION_UNKNOWN', { cause })
 }
 
+const QUOTA_FAILURES = {
+  login_required: {
+    code: 'PROXY_QUOTA_LOGIN_REQUIRED',
+    message: 'Sign in to Antigravity as the account worker’s service user on the Account Switcher host.',
+    label: 'sign-in required',
+  },
+  timeout: {
+    code: 'PROXY_QUOTA_TIMEOUT',
+    message: 'The Account Switcher timed out while checking account quota.',
+    label: 'quota check timed out',
+  },
+  invalid_quota: {
+    code: 'PROXY_QUOTA_INVALID',
+    message: 'The Account Switcher received missing or invalid quota fields.',
+    label: 'missing or invalid quota fields',
+  },
+} as const
+
+function quotaFailure(data: unknown): LlmError {
+  const reasons = new Set<keyof typeof QUOTA_FAILURES>()
+  let other = false
+  const collect = (reason: unknown) => {
+    switch (reason) {
+      case 'login_required':
+      case 'timeout':
+      case 'invalid_quota':
+        reasons.add(reason)
+        break
+      default:
+        other = true
+    }
+  }
+  if (isRecord(data) && data.kind === 'quota_unknown') {
+    if (data.reason !== undefined) collect(data.reason)
+    if (Array.isArray(data.accounts)) {
+      for (const account of data.accounts) collect(isRecord(account) ? account.reason : undefined)
+    }
+  }
+  const failures = [...reasons].map(reason => QUOTA_FAILURES[reason])
+  const single = !other && failures.length === 1 ? failures[0] : undefined
+  if (single !== undefined) return new LlmError(single.message, single.code)
+
+  const labels: string[] = failures.map(failure => failure.label)
+  if (other && labels.length > 0) labels.push('another probe failure')
+  const message = labels.length > 0
+    ? `The Account Switcher could not determine account quota. Checks reported ${labels.join(', ')}.`
+    : 'The Account Switcher could not determine account quota. Check the account workers and quota configuration.'
+  return new LlmError(message, 'PROXY_QUOTA_UNAVAILABLE')
+}
+
 export function proxyError(error: unknown, submitted = false): LlmError | undefined {
   if (submitted && error instanceof JsonRpcClosedError) return submissionUnknown(error)
   if (!(error instanceof JsonRpcRemoteError)) return undefined
   switch (error.rpc.code) {
     case -32040:
-      return new LlmError('The Account Switcher could not determine account quota. Check the router diagnostics.', 'PROXY_QUOTA_UNAVAILABLE', { cause: error })
+      return quotaFailure(error.rpc.data)
     case -32041:
       return submissionUnknown(error)
     case -32042:

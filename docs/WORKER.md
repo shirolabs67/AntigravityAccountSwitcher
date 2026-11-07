@@ -19,17 +19,18 @@ agy acp --help
 
 在管理员的交互式 SSH 终端中，以每个 worker 的服务用户分别执行 `agy acp --login`，在本地浏览器打开 CLI 给出的授权 URL，登录对应 Google 账号，再把一次性代码交给该 CLI。登录和运行 worker 应使用同一用户、同一实际 home 和同一 CLI 配置。一次性代码只在终端交给 CLI。缓存凭据和证书私钥保存在服务用户或系统提供的凭据存储中，仓库配置只引用必要的本机路径。
 
-Linux 上 CLI 会尝试使用该用户的 Secret Service/D-Bus 安全存储。交互登录之后，应在 worker 真正使用的服务环境中验证缓存凭据可读，包括无 TTY 启动和重启。若交互式命令可用、服务里却报 `authentication required`，检查该服务的用户身份、home，以及其会话对该用户自身凭据存储的可见性。验收通过之前保留现有 DSH 直连。
+Linux 上 CLI 会尝试使用该用户的 Secret Service/D-Bus 安全存储。systemd 系统单元的 `User=` 会切换运行身份，但不会自动接入用户登录时解锁的密钥环。先在各自登录会话中前台启动 worker。若交互式命令可用，后台却提示需要登录或密钥环已锁定，检查实际服务环境的用户、HOME 和该用户的 D-Bus/Secret Service 会话。需要密钥环时，在该账号的用户服务和已解锁会话中运行，并验证服务重启后仍可读取凭据。两个账号均通过无 TTY 验收后，再启用代理模式。
 
 - [Google SSH OAuth 登录流程](https://antigravity.google/docs/install?tab=cli#remote-ssh-oauth-flow)
 - [Google ACP 登录命令](https://antigravity.google/docs/ide/extensions/acp/#flags)
 - [Google CLI 无终端环境的认证行为](https://antigravity.google/docs/cli/headless/#run-a-single-prompt)
+- [Google 密钥环访问排查](https://antigravity.google/docs/cli/troubleshooting#authorize-keyring-permissions)
 
 ## 每账号配置
 
-为每个账号复制一份 [worker 配置示例](../examples/worker.example.json)，配置 `runAsUser`、`agyPath`、`cwd` 和该 worker 的证书。`cwd` 使用该用户拥有的专用工作目录。相对路径由启动器按配置文件所在目录解析。使用独立 home 时可省略 `geminiDir`，CLI 的默认设置文件为 `$HOME/.gemini/antigravity-cli/settings.json`，默认的全局自定义目录为 `$HOME/.gemini/config/`。若设置 `geminiDir`，worker 会在额度查询和 ACP 调用中传入相同的 `--gemini-dir`，实机登录和验收也要用同一选项。
+为每个账号复制一份 [worker 配置示例](../examples/worker.example.json)，配置 `runAsUser`、`agyPath`、`cwd` 和该 worker 的证书。`cwd` 使用该用户拥有的专用工作目录。相对路径由启动器按配置文件所在目录解析。登录、查额度和 ACP 都使用服务用户自己的默认 HOME。CLI 设置文件为 `$HOME/.gemini/antigravity-cli/settings.json`，全局自定义目录为 `$HOME/.gemini/config/`。agy 1.5.3 的 ACP 接受 `--gemini-dir`，但非交互 `/usage` 拒绝该选项。若早期 worker 配置包含 `geminiDir`，删除该字段，并以实际服务用户在默认 HOME 下完成登录和代理配置。
 
-工作目录及其父目录应保持干净，避免从仓库加载其他钩子或工具。在 `cwd/.agents/agents/dsh-bridge.md` 保存下面的本机配置。启动器要求文件可读且非空，实际加载的工具由下文验收确认。
+工作目录及其父目录应保持干净，避免从仓库加载其他钩子或工具。以 worker 用户身份将下方配置写入 `$HOME/.gemini/config/agents/dsh-bridge.md`。从先前的工作目录配置升级时，把同一份文件移到上述位置。官方 agy 会略过未信任工作目录中的 `.agents/agents/`。启动器检查 CLI 配置目录里的文件，实际加载的工具由下文验收确认。
 
 ```markdown
 ---
@@ -52,11 +53,12 @@ Follow the system instructions provided by DSH. Use only the tools DSH attaches 
 - [Google CLI 配置文件位置](https://antigravity.google/docs/settings?tab=cli#configuration-file-location)
 - [Google 自定义代理的发现路径](https://antigravity.google/docs/subagents?tab=cli)
 - [Google Markdown 代理字段](https://antigravity.google/docs/build-plugins)
+- [Google 对未信任工作目录的说明](https://github.com/google-antigravity/antigravity-cli/issues/1270#issuecomment-6279349418)
 - [DSH 上游代理生成逻辑](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/src/preflight.ts#L213-L243)
 
 ## 账号验收
 
-在各 worker 的实际服务身份和工作目录下执行以下命令。使用 `agyPath` 指向的二进制。配置 `geminiDir` 时，在 `agents`、`/config` 和 `/usage` 检查中传入同一个 `--gemini-dir <目录>`。输出只在服务器上核对。
+在各 worker 的实际服务身份和工作目录下执行以下命令。使用 `agyPath` 指向的二进制。命令使用各自的默认 HOME。输出只在服务器上核对。
 
 ```sh
 agy --version

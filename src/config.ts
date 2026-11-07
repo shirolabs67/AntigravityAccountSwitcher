@@ -17,7 +17,6 @@ export type WorkerConfig = ClientConfig & {
   runAsUser: string;
   agyPath: string;
   cwd: string;
-  geminiDir?: string;
   probeTimeoutMs?: number;
 };
 
@@ -152,6 +151,7 @@ export async function ingressConfig(path: string): Promise<ClientConfig> {
 
 export async function workerConfig(path: string): Promise<WorkerConfig> {
   const { raw, directory } = await loadConfig(path);
+  if (raw.geminiDir !== undefined) throw new PeerError('remove_gemini_dir_use_service_home');
   const local = (key: string): string => resolve(directory, str(raw[key], key));
   const timeout = raw.probeTimeoutMs ?? 15_000;
   if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 100 || timeout > 30_000) return invalid('probe_timeout');
@@ -160,7 +160,6 @@ export async function workerConfig(path: string): Promise<WorkerConfig> {
     runAsUser: str(raw.runAsUser, 'run_as_user', 128),
     agyPath: local('agyPath'),
     cwd: local('cwd'),
-    geminiDir: raw.geminiDir === undefined ? undefined : local('geminiDir'),
     probeTimeoutMs: timeout,
   };
 }

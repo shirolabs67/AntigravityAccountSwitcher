@@ -2,7 +2,7 @@ import { userInfo } from 'node:os';
 import { connect, type ConnectionOptions, type TLSSocket } from 'node:tls';
 import { runBroker } from './broker.js';
 import { brokerConfig, ingressConfig, workerConfig } from './config.js';
-import { AccountWorker, validateWorkerWorkspace, WorkerError } from './worker.js';
+import { AccountWorker, validateWorkerAgent, WorkerError } from './worker.js';
 import { Lines, object, Peer, PeerError } from './wire.js';
 
 function tlsConnect(options: ConnectionOptions): Promise<TLSSocket> {
@@ -37,7 +37,7 @@ async function worker(configPath: string): Promise<void> {
     ? actual.toLowerCase() === config.runAsUser.toLowerCase()
     : actual === config.runAsUser;
   if (!sameUser || process.getuid?.() === 0) throw new PeerError('wrong_worker_user');
-  try { await validateWorkerWorkspace(config.cwd); }
+  try { await validateWorkerAgent(); }
   catch { throw new PeerError('agent_missing'); }
   const runtime = new AccountWorker(config);
   let stopping = false;

@@ -38,7 +38,7 @@ function setup(t) {
     identityFile: join(home, 'id test'), knownHostsFile: join(home, 'known hosts'),
   }
   const state = {
-    account: 'a', generation: '1', fail: undefined, packets: [], arguments: [], pending: new Map(),
+    account: 'a', generation: '1', fail: undefined, quotaDetails: undefined, packets: [], arguments: [], pending: new Map(),
     mcpRequests: [], localProbes: 0, lastSpawn: 0,
   }
   let nextLease = 0
@@ -76,7 +76,7 @@ function setup(t) {
           result({ protocolVersion: 1, _meta: { [extension]: { version: 1 } } })
           break
         case '_' + extension + '/acquireTurn': {
-          if (state.fail === 'quota') return fail(err(-32040, 'quota unavailable'))
+          if (state.fail === 'quota') return fail({ ...err(-32040, 'quota unavailable'), data: state.quotaDetails })
           const exhausted = state.account === undefined
           const lease = {
             status: exhausted ? 'exhausted' : 'selected',
@@ -293,6 +293,30 @@ test('submitted SSH and worker failures cannot replay the same input, and DSH re
   }
   state.fail = 'quota'
   await assert.rejects(collect(request('chat', [sys, user('quota', 'quota probe')])), { code: 'PROXY_QUOTA_UNAVAILABLE' })
+})
+
+test('quota failures surface only allowlisted reasons without exposing router details', async t => {
+  const { request, state, packets } = setup(t)
+  const secret = 'https://example.test/private-login?token=hidden'
+  const accountId = 'private-account-id'
+  state.fail = 'quota'
+  for (const [details, code, message] of [
+    [{ accounts: [{ accountId, reason: 'login_required', raw: secret }] }, 'PROXY_QUOTA_LOGIN_REQUIRED', /Sign in to Antigravity/],
+    [{ reason: 'timeout' }, 'PROXY_QUOTA_TIMEOUT', /timed out/],
+    [{ accounts: [{ accountId, reason: 'invalid_quota' }] }, 'PROXY_QUOTA_INVALID', /missing or invalid quota fields/],
+    [{ accounts: [{ accountId, reason: 'login_required' }, { accountId, reason: 'invalid_quota' }, { accountId, reason: secret }] }, 'PROXY_QUOTA_UNAVAILABLE', /sign-in required.*missing or invalid quota fields.*another probe failure/],
+    [{ accounts: [{ accountId, reason: secret }] }, 'PROXY_QUOTA_UNAVAILABLE', /Check the account workers and quota configuration/],
+  ]) {
+    state.quotaDetails = { kind: 'quota_unknown', ...details }
+    await assert.rejects(collect(request('chat', [sys, user('quota', 'quota probe')])), error => {
+      assert.equal(error.code, code)
+      assert.match(error.message, message)
+      assert.ok(!error.message.includes(secret) && !error.message.includes(accountId))
+      assert.equal(error.cause, undefined)
+      return true
+    })
+  }
+  assert.equal(packets('session/prompt').length, 0)
 })
 
 test('worker loss while parked blocks tool continuation and releases its lease', async t => {

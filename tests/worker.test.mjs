@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { AccountWorker, validateWorkerWorkspace, WorkerError } from '../dist/worker.js'
+import { workerConfig } from '../dist/config.js'
+import { AccountWorker, validateWorkerAgent, WorkerError } from '../dist/worker.js'
 
 const group = 'Gemini Models'
 const fixture = [
@@ -14,6 +15,8 @@ const fixture = [
   "if (command === '-p') {",
   "  if (mode === 'timeout') setInterval(() => {}, 1_000)",
   "  else if (mode === 'auth') { process.stderr.write('authentication required: test secret'); process.exitCode = 1 }",
+  "  else if (mode === 'auth-wait') { process.stderr.write('Authentication required. Please visit '); setTimeout(() => process.stderr.write('the URL to log in: https://example.invalid/'), 20); setInterval(() => {}, 1_000) }",
+  "  else if (mode === 'keyring-locked') { process.stderr.write('Error: failed to retrieve token: secret keyring is locked'); setInterval(() => {}, 1_000) }",
   "  else if (mode === 'oversize') process.stdout.write('x'.repeat(1_100_000))",
   "  else process.stdout.write(response)",
   "} else if (mode === 'invalid-acp') {",
@@ -59,7 +62,6 @@ async function setup(t) {
       const worker = new AccountWorker({
         agyPath: process.execPath,
         cwd,
-        geminiDir: join(cwd, 'profile'),
         probeTimeoutMs,
       }, (path, args, options) => {
         const child = spawn(path, [script, mode, response, ...args], options)
@@ -81,7 +83,7 @@ test('quota probes use the local profile and accept the real weekly and five-hou
   const worker = context.worker('quota', usage([weekly(0.05), short(0)]))
   assert.deepEqual(await worker.probe(group), { weekly: 0.05, fiveHour: 0 })
   const [probe] = context.spawned
-  assert.deepEqual(probe.args, ['-p', '/usage', '--output-format', 'json', '--gemini-dir', join(context.cwd, 'profile')])
+  assert.deepEqual(probe.args, ['-p', '/usage', '--output-format', 'json'])
   assert.deepEqual(probe.options, { cwd: context.cwd, windowsHide: true, shell: false, stdio: 'pipe' })
 })
 
@@ -110,6 +112,8 @@ test('quota probe failures distinguish login, timeout, output limits and shutdow
   await Promise.all([
     aborted,
     assert.rejects(context.worker('auth').probe(group), category('quota-auth')),
+    assert.rejects(context.worker('auth-wait', '', 2_000).probe(group), category('quota-auth')),
+    assert.rejects(context.worker('keyring-locked', '', 2_000).probe(group), category('quota-auth')),
     assert.rejects(context.worker('timeout', '', 100).probe(group), category('quota-timeout')),
     assert.rejects(context.worker('oversize').probe(group), category('quota-invalid')),
   ])
@@ -151,7 +155,6 @@ test('ACP streams isolate reused request IDs and preserve extensions while repla
   }
   assert.deepEqual(context.spawned[0].args, [
     'acp', '--process-per-session', '--disable-telemetry', '--agent', 'dsh-bridge',
-    '--gemini-dir', join(context.cwd, 'profile'),
   ])
   worker.close('one')
   worker.close('one')
@@ -170,9 +173,9 @@ test('invalid child stdout closes the affected ACP stream without forwarding it'
   assert.throws(() => worker.send('bad', { jsonrpc: '2.0' }), category('stream-unavailable'))
 })
 
-test('worker startup requires the configured workspace agent to exist and be readable', async t => {
+test('worker startup requires the configured profile agent to exist and be readable', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'aas-worker-agent-test-'))
-  const customizations = join(cwd, '.agents')
+  const customizations = join(cwd, 'config')
   const agents = join(customizations, 'agents')
   const agent = join(agents, 'dsh-bridge.md')
   t.after(async () => {
@@ -182,9 +185,20 @@ test('worker startup requires the configured workspace agent to exist and be rea
     await rmdir(cwd)
   })
   await mkdir(agents, { recursive: true })
-  await assert.rejects(validateWorkerWorkspace(cwd), category('agent-missing'))
+  await assert.rejects(validateWorkerAgent(cwd), category('agent-missing'))
   await writeFile(agent, '')
-  await assert.rejects(validateWorkerWorkspace(cwd), category('agent-missing'))
+  await assert.rejects(validateWorkerAgent(cwd), category('agent-missing'))
   await writeFile(agent, '---\nname: dsh-bridge\n---\n')
-  await validateWorkerWorkspace(cwd)
+  await validateWorkerAgent(cwd)
+})
+
+test('worker config rejects a custom ACP-only profile before startup', async t => {
+  const { cwd } = await setup(t)
+  const path = join(cwd, 'legacy-worker.json')
+  await writeFile(path, JSON.stringify({ geminiDir: 'legacy-profile' }))
+  try {
+    await assert.rejects(workerConfig(path), { category: 'remove_gemini_dir_use_service_home' })
+  } finally {
+    await unlink(path)
+  }
 })
