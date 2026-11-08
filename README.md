@@ -1,6 +1,12 @@
 # Antigravity Account Switcher
 
-给多台 DeepSeek Harness（DSH）提供一个共享的 Antigravity CLI 账号入口。Rust 服务通过同一个 `aas` 二进制运行共享路由器、SSH stdio 入口和账号 worker。DSH 插件管理聊天与工具。路由器在每个新轮次开始前查看目标模型组的额度，并选择在独立 Linux 服务用户和 HOME 下运行的官方 `agy acp`。
+给多台 DeepSeek Harness（DSH）提供一个共享的 Antigravity CLI 账号入口。
+
+**Rust 服务端**通过 `aas` 二进制分别启动共享路由器、SSH stdio 入口和账号 worker。路由器在每轮开始前检查模型组额度，分配本轮使用的账号，再将 ACP 请求转发给以独立 Linux 服务用户和 HOME 运行的官方 `agy acp`。
+
+**DSH 客户端插件**位于 `dsh-plugin/`，是在上游 `dsh-llm-antigravity-acp` 基础上加入代理模式的适配器，由 DSH 在自己的主机上安装和加载。启用代理后，插件通过 SSH 连接 `aas`，在每个 DSH 轮次开始和结束时申请和释放账号租约。换号时，插件用 DSH 持有的聊天历史重建会话。工具调用也通过插件回到 DSH。默认直连模式下，插件调用 DSH 主机上的 `agy`。 [插件构建与配置](dsh-plugin/README.md)
+
+两部分同仓维护，便于同步更新代理协议和运行联调测试。Docker 镜像交付 Rust 服务端，客户端插件单独构建。
 
 ## 部署
 
@@ -31,7 +37,7 @@ docker compose build
 - [DSH 插件构建与配置](dsh-plugin/README.md)
 - [仓库协作约定](AGENTS.md)
 
-账号、系统凭据、SSH 密钥、实际模型配置和聊天内容留在各自主机的受保护环境。插件默认保留原直连模式；代理模式由部署者显式启用。
+账号、系统凭据、SSH 密钥、实际模型配置和聊天内容留在各自主机的受保护环境。
 
 ## 开发验证
 
