@@ -28,7 +28,7 @@ fn profile_for(run_as_user: &str) -> Result<PathBuf, PeerError> {
         let uid = uzers::get_effective_uid();
         if uid == 0
             || uid != uzers::get_current_uid()
-            || !uzers::get_user_by_uid(uid).is_some_and(|user| user.name() == run_as_user)
+            || uzers::get_user_by_uid(uid).is_none_or(|user| user.name() != run_as_user)
         {
             return Err(wrong_user());
         }
