@@ -4,9 +4,11 @@
 
 项目内容与详细实现说明见 [README.md](README.md)。
 
-DSH 客户端使用 [dsh-llm-antigravity-acp 插件](https://github.com/lili-luo/dsh-plugin-bundle/tree/main/dsh-llm-antigravity-acp)。
+服务端用 Rust 实现，统一入口为 `aas <serve|worker|ingress> <config.json>`，作为独立进程负责账号选择、轮次租约和 ACP 转发。
 
-服务端用 Rust 实现，统一入口为 `aas <serve|worker|ingress> <config.json>`。仓库内的 `dsh-plugin/` 继续按 DSH 的 Node.js 插件接口构建。
+`dsh-plugin/` 是基于上游 `dsh-llm-antigravity-acp` 加入代理模式的客户端适配器。它按 DSH 的 Node.js 插件接口构建，由 DSH 主机单独安装和加载。代理模式通过 SSH 调用服务端的轮次租约接口，历史重建和工具调用由 DSH 侧处理。 [插件说明](dsh-plugin/README.md) · [上游插件](https://github.com/lili-luo/dsh-plugin-bundle/tree/main/dsh-llm-antigravity-acp)
+
+两部分同仓维护，便于同步更新代理协议和运行联调测试。服务端和插件独立交付，服务端 Docker 镜像按第 8 条约定构建。
 
 1. 按 [实施顺序](docs/IMPLEMENTATION.md) 交付。修改组件或协议时，同步维护 [C4 架构](docs/ARCHITECTURE.md)；修改安装、配置或回退时更新 [部署文档](docs/OPERATIONS.md)。
 2. ACP 使用 v1 stdio；stdout 只写协议帧。每个 DSH 连接从 SSH 身份取得租户归属。自定义扩展、会话 ID、请求 ID、取消与工具回调都按已认证连接校验。
