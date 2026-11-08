@@ -7,7 +7,7 @@ Wants=network-online.target aas-router.service
 User=%i
 UMask=0077
 NoNewPrivileges=true
-ExecStart=/usr/bin/node /opt/antigravity-account-switcher/dist/cli.js worker /etc/antigravity-account-switcher/%i/worker.json
+ExecStart=/opt/antigravity-account-switcher/bin/aas worker /etc/antigravity-account-switcher/%i/worker.json
 Restart=on-failure
 RestartSec=3s
 

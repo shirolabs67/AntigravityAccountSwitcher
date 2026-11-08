@@ -2,10 +2,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
-import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import { Router } from '../dist/router.js';
+import { startBroker } from './broker-fixture.mjs';
 import { AntigravityAdapter } from '../dsh-plugin/lib/adapter.js';
 import { Config } from '../dsh-plugin/lib/config.js';
 import { AntigravityRuntime } from '../dsh-plugin/lib/runtime.js';
@@ -17,26 +15,35 @@ const user = (id, text) => turn(id, 'user', text, { kind: 'user' });
 const answer = (id, text) => turn(id, 'assistant', text, { kind: 'model', provider, model });
 const textOf = chunks => chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('');
 
-test('real DSH adapter and router switch accounts, replay own history, and return normal exhaustion', { timeout: 15_000 }, async t => {
+test('real DSH adapter and Rust router switch accounts, replay own history, and return normal exhaustion', { timeout: 45_000 }, async t => {
   const quotas = new Map([['a', 0.05], ['b', 0.30]]);
   const seen = [];
   const checked = [];
   let sessionCounter = 0;
-  const directory = {
-    async probe(account, group) {
-      assert.equal(group, 'Gemini Models');
-      checked.push(account);
-      return { weekly: 0.50, fiveHour: quotas.get(account) };
-    },
-    async open(account) {
-      let onFrame;
-      let onClose;
-      const send = frame => queueMicrotask(() => onFrame?.({ jsonrpc: '2.0', ...frame }));
-      return {
-        onFrame(fn) { onFrame = fn; },
-        onClose(fn) { onClose = fn; },
-        close() { onClose?.(); },
-        send({ id, method, params }) {
+  const instances = { 'dsh-a': 43101, 'dsh-b': 43102 };
+  const broker = await startBroker(t, { accounts: ['a', 'b'], instances, modelGroups: { [model]: 'Gemini Models' } });
+  for (const account of quotas.keys()) {
+    const streams = new Set();
+    const worker = await broker.link('worker', account, (operation, args) => {
+      switch (operation) {
+        case 'worker/probe':
+          assert.equal(args.groupId, 'Gemini Models');
+          checked.push(account);
+          return { weekly: 0.50, fiveHour: quotas.get(account) };
+        case 'worker/open':
+          assert.ok(!streams.has(args.streamId));
+          streams.add(args.streamId);
+          return null;
+        case 'worker/close':
+          streams.delete(args.streamId);
+          worker.notify('worker/closed', { streamId: args.streamId });
+          return null;
+        case 'worker/send': {
+          assert.ok(streams.has(args.streamId));
+          const { id, method, params } = args.frame;
+          const send = frame => worker.notify('worker/frame', {
+            streamId: args.streamId, frame: { jsonrpc: '2.0', ...frame },
+          });
           const result = value => send({ id, result: value });
           switch (method) {
             case 'initialize':
@@ -58,37 +65,22 @@ test('real DSH adapter and router switch accounts, replay own history, and retur
             default:
               if (id !== undefined) return send({ id, error: { code: -32601, message: 'unsupported test method' } });
           }
-        },
-      };
-    },
-  };
-  const config = { accounts: ['a', 'b'], modelGroups: { [model]: 'Gemini Models' },
-    instances: { 'dsh-a': { mcpPort: 43101 }, 'dsh-b': { mcpPort: 43102 } } };
-  const router = new Router(config, directory);
+        }
+        default:
+          assert.fail('Unexpected worker operation: ' + operation);
+      }
+    });
+    assert.equal(await worker.request('broker/ready', {}), true);
+  }
 
   async function dsh(id) {
     const home = await mkdtemp(join(tmpdir(), 'aas-joint-'));
+    const spawnAcp = await broker.ingress(id);
     const runtime = new AntigravityRuntime({
       config: Config({ home, autoPatch: false, warmup: false,
-        proxy: { host: 'router.example.test', user: 'aas-test', remotePort: config.instances[id].mcpPort,
+        proxy: { host: 'router.example.test', user: 'aas-test', remotePort: instances[id],
           identityFile: join(home, 'id'), knownHostsFile: join(home, 'known_hosts') } }),
-      spawnAcp() {
-        const stdin = new PassThrough();
-        const stdout = new PassThrough();
-        const source = createInterface({ input: stdin });
-        let resolve;
-        const exited = new Promise(done => { resolve = done; });
-        const connection = router.connect(id, frame => stdout.write(JSON.stringify(frame) + '\n'));
-        source.on('line', line => { void connection.receive(JSON.parse(line)); });
-        const close = () => {
-          connection.close();
-          source.close();
-          stdin.end();
-          stdout.end();
-          resolve({ code: 0, signal: null });
-        };
-        return { stdin, stdout, exited, terminate: close, stderrTail: () => '' };
-      },
+      spawnAcp,
       runCommand() { assert.fail('Proxy ran the local agy command'); },
       readImage: async () => undefined, canReadImages: () => false,
       log: { warn() {}, info() {} }, onModelsChanged() {},

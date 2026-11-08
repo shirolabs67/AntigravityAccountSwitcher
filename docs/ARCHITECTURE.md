@@ -25,9 +25,9 @@ flowchart LR
     A --- B
   end
   subgraph S["Antigravity Account Switcher"]
-    E["SSH 入口<br/>每条连接一个 stdio 转发进程"]
-    R["共享路由器<br/>Node.js；持有顺序和租约"]
-    W["账号 worker 实例<br/>Node.js；每个 Linux 服务用户一份"]
+    E["SSH 入口<br/>Rust aas ingress；每条连接一个 stdio 转发进程"]
+    R["共享路由器<br/>Rust aas serve；持有顺序和租约"]
+    W["账号 worker 实例<br/>Rust aas worker；每个 Linux 服务用户一份"]
     E -->|"回环 TLS，按证书认证"| R
     R -->|"回环 TLS，按证书认证"| W
   end
@@ -89,7 +89,9 @@ classDiagram
 - ACP 规范之外的扩展必须显式协商。客户端把租约关联到会话创建和本轮请求，不把聊天历史放入额外的账号数据库。
 - 无可用且确认全部耗尽时，代理可提供不启动 agy 的合成会话，按 `agent_message_chunk`、`stopReason: end_turn` 结束；插件仍走普通回复路径，并在之后真正选中账号时重建会话。
 
-实现入口：[路由和租约](../src/router.ts) · [ACP 双向请求](../src/acp-backend.ts) · [回环 TLS 路由](../src/broker.ts) · [账号进程](../src/worker.ts)。
+Rust 连接任务按序接收 ACP 帧，并在额度探测、进程启动或等待 ACP 响应时继续处理取消、断线和权限回调。代理与 worker 的内部链路为有界逐行 JSON，使用 TLS 1.3 进行双向认证并校验证书 SHA-256 指纹。入口仅将 ACP 帧写入 stdout。
+
+实现入口见[路由和租约](../src/router.rs)、[ACP 双向请求](../src/acp_backend.rs)、[回环 TLS 路由](../src/broker.rs)、[帧传输](../src/wire.rs)和[账号进程](../src/worker.rs)。
 
 ## 动态视图 · A 在旧号工具回调中，B 触发切号
 
@@ -116,7 +118,7 @@ sequenceDiagram
   A->>Y: 通过路由器，用 A 自己的历史重建会话
 ```
 
-## 部署视图 · Linux 服务器与两台 DSH
+## 部署视图 · Docker 主机与两台 DSH
 
 ```mermaid
 flowchart LR
@@ -126,21 +128,23 @@ flowchart LR
   subgraph DB["DSH 主机 B"]
     B["DSH + 插件<br/>SSH 密钥 B + 本地 MCP"]
   end
-  subgraph H["目标 Linux 主机"]
-    SSH["OpenSSH Server<br/>密钥绑定实例及回环端口"]
-    R["共享路由器"]
-    subgraph UA["独立 Linux 服务用户 A"]
-      WA["Worker A + 官方 agy<br/>配置与凭据 A"]
+  subgraph H["Linux Docker Engine 或 Windows Docker Desktop"]
+    subgraph NET["共享容器网络命名空间"]
+      SSH["SSH 容器<br/>OpenSSH + aas ingress"]
+      R["Router 容器<br/>aas serve"]
+      WA["Worker A 容器<br/>独立 Linux 用户与 HOME 卷"]
+      WB["Worker B 容器<br/>独立 Linux 用户与 HOME 卷"]
+      SSH -->|"127.0.0.1 mTLS"| R
+      R -->|"127.0.0.1 mTLS"| WA
+      R -->|"127.0.0.1 mTLS"| WB
+      WA -.->|"租户专属 MCP 回环端口"| SSH
+      WB -.->|"租户专属 MCP 回环端口"| SSH
     end
-    subgraph UB["独立 Linux 服务用户 B"]
-      WB["Worker B + 官方 agy<br/>配置与凭据 B"]
-    end
-    SSH --> R
-    R --> WA
-    R --> WB
   end
   A -->|"SSH：ACP stdio 与 A 专属反向转发"| SSH
   B -->|"SSH：ACP stdio 与 B 专属反向转发"| SSH
 ```
+
+宿主机只发布 SSH 端口。路由端口及 SSH 反向转发的 MCP 端口监听在容器网络的回环接口。每个角色分别挂载所需的证书与配置。worker 的 HOME 卷独立持久化，SSH 主机密钥也使用独立卷。原生 Linux 部署通过主机的回环接口连接同样的三个 Rust 入口，由 OpenSSH 和 systemd 管理对应进程。
 
 协议与部署依据：[ACP stdio](https://agentclientprotocol.com/protocol/v1/transports) · [ACP 扩展](https://agentclientprotocol.com/protocol/v1/extensibility) · [ACP 回合](https://agentclientprotocol.com/protocol/v1/prompt-turn) · [官方 CLI ACP](https://antigravity.google/docs/cli/acp/) · [模型组额度](https://antigravity.google/docs/cli/commands/usage/) · [OpenSSH 转发限制](https://man.openbsd.org/sshd.8#permitlisten)。

@@ -1,6 +1,6 @@
 # 实施与验收
 
-本文记录实施顺序与通过条件。P0 已完成。P1 与 P2 已完成实现与模拟测试；P3 将在从 Git 拉取到 Linux 服务器、配置实际 SSH 地址和端口后进行。
+本文记录实施顺序与通过条件。P0 至 P2 已实现。P3 记录 Rust 迁移的验证结果、Docker 验收及实机切换条件。
 
 ## P0 仓库初始化
 
@@ -10,8 +10,8 @@
 
 ## P1 共享路由器与账号进程
 
-1. 在目标 Linux 服务器核对 Node.js、OpenSSH、`agy`，在两台 DSH 核对插件版本。为两个 Google 账号分别准备 Linux 服务用户、HOME 和专用 CLI 配置目录，在各自身份下运行额度探测与 `agy acp`。先验证两账号能同时保持登录、各自读取额度，并确认进程运行时能访问该用户的凭据与配置。[Linux 账号凭据预检](WORKER.md)
-2. 用 TypeScript 和 Node.js 实现共享路由器、SSH stdio 接入与账号 worker。由一个共享进程拥有当前账号与租约状态，每个 SSH 入口向它转交已认证实例的连接。账号 worker 在相应 Linux 服务用户下运行，独立拥有 `agy` 进程、工作目录和诊断日志。账号顺序、阈值、固定提示、模型组映射和实例端口从本地配置读取。发布样例使用占位符，实际凭据和私有配置由部署环境管理。
+1. 在部署环境核对 OpenSSH 与 `agy`，在两台 DSH 核对 Node.js 与插件版本。为两个 Google 账号分别准备 Linux 服务用户、HOME 和专用工作目录，在各自身份下运行额度探测与 `agy acp`。验证两个账号能同时保持登录、各自读取额度，并确认进程运行时能访问该用户的凭据与配置。[账号凭据预检](WORKER.md)
+2. 用 Rust 实现共享路由器、SSH stdio 接入与账号 worker，由 `aas serve`、`aas ingress` 和 `aas worker` 启动。共享路由器持有当前账号与租约，每个 SSH 入口向它转交已认证实例的连接。账号 worker 在对应服务用户下运行并管理独立的 `agy` 子进程。账号顺序、阈值、固定提示、模型组映射和实例端口从本地配置读取。Docker 多阶段构建为每个角色打包发布二进制和运行时依赖。
 3. 在每次新 DSH 回合取得租约时探测目标模型组。记录该账号五小时和每周剩余量，取两项的较低值。以当前账号为起点按配置顺序最多绕一圈，选择第一个达到阈值的账号。默认阈值为 5%，等于 5% 可用。仅整圈每个账号都明确低于阈值时返回额度不足结果。未登录、探测超时、命令失败、组或窗口缺失、比例无效都属于探测失败。如果整圈找不到可用账号且有探测失败，按诊断错误处理。用实际安装版本采集脱敏 `agy -p /usage --output-format json` 样本，验证分组、窗口字段和比例单位。上游插件把缺失比例转成零并可回落到第一个组，路由器需要独立进行严格校验。[Google 额度说明](https://antigravity.google/docs/cli/commands/usage/) · [上游额度解析](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/src/quota.ts#L35-L70)
 4. 在路由器上以认证实例、连接和代理会话标识为边界管理请求、流、取消和权限回调。后端请求和反向请求各自分配关联标识，以连接与请求方向区分同名 JSON-RPC ID。工作目录由账号 worker 解析为 Linux 服务器上的受控目录。每个 DSH 实例使用独立 SSH 密钥和专属 Linux 服务器回环监听端口，通过反向转发连到该 DSH 的回环 MCP 桥。端口绑定错误时应阻止该连接进入代理模式。[ACP stdio](https://agentclientprotocol.com/protocol/v1/transports) · [OpenSSH 反向转发监听约束](https://man.openbsd.org/sshd.8#permitlisten)
 
@@ -35,9 +35,32 @@
 
 ## P3 验证、切换与回退
 
-已通过根目录 TypeScript 构建和 14 项路由、worker、双向 TLS 测试；插件的构建、类型检查和 54 项测试通过。在分别构建根目录与插件后，使用 `npm run test:integration` 运行实际插件代码与路由器的联调，模拟两台 DSH 使用相同聊天 ID 切号、重建隔离和额度不足。上述结果未使用真实账号。会话创建和配置超时后，同一聊天可以重新开始，其他已经提交的轮次继续运行。另在本地 Ubuntu 的隔离环境用真实 OpenSSH 和两个 DSH 插件连接运行了 MCP 联调。OpenSSH 拒绝跨实例绑定端口，B 在 A 等工具结果时完成新轮次，A 通过原隧道收到一次工具结果，随后旧子进程退出，下一轮只重放 A 的历史。此项使用模拟 agy 和额度。另以校验过的官方 Linux agy 1.5.3 在空白 HOME 验证了全局代理发现、ACP v1 初始化及未登录的 `/usage` 分类。没有在此探测登录或发起模型生成。
+### Rust 迁移验证
 
-先使用模拟 ACP worker 验证路由器。插件改动通过上游 `npm run build`、`npm run typecheck`、`npm test`，并将代理回归场景接入现有假 agy 测试。构建需 TypeScript 和 DSH peer 声明，可通过 `DSH_CHECKOUT` 指向已构建的 DSH 源码检出。实际接入再使用两台 DSH 主机和两个真实账号验收。[上游构建脚本](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/scripts/build.mjs) · [上游运行时测试](https://github.com/lili-luo/dsh-plugin-bundle/blob/6aac22493754c5aefb4642b2627c88b136c72b6d/dsh-llm-antigravity-acp/tests/runtime.test.mjs)
+| 环境 | 场景和结果 |
+| --- | --- |
+| Windows AMD64 · Rust 1.93.0 | 17 项默认测试和 3 项使用 Node 模拟 agy 的子进程测试通过，覆盖额度、轮次隔离、取消、会话超时清理和有界帧传输。 |
+| Windows AMD64 · Node.js 24.16.0 · DSH 0.2.1-rc.5 的包声明 | 插件 0.2.0 构建、类型检查和 54 项测试通过。另有 3 项测试通过实际 Rust 路由器和 ingress 验证双向 TLS、证书指纹、跨 DSH 会话隔离、切号重建和额度不足回复。 |
+| Windows AMD64 · 模拟 agy | 用实际 `aas.exe` 运行全部三个入口，验证 worker 的运行身份、回环双向 TLS、额度探测、会话工作目录、prompt、释放租约和断开后的清理。 |
+| Linux AMD64 · Rust 1.93.0 | 从 Windows 交叉编译并链接 `x86_64-unknown-linux-gnu` 发布二进制，目标 glibc 为 Debian 12 的 2.36。 |
+| Docker Compose 2.32.4 · Windows | Compose 配置校验通过。官方 agy 1.5.3 的 Linux AMD64 和 ARM64 发布包通过 SHA-512 核验。当前主机无法启动 WSL 2 Linux 引擎，镜像构建与容器内 SSH 转发由 Linux CI 的 `tests/docker-smoke.sh` 验证。 |
+| 真实部署 | 两个账号的 OAuth 持久性、两台 DSH 主机的工具回调及适用时的 QQ 原会话回复等待现场验收。 |
+
+本地回归可在仓库根目录运行。证书夹具需要 OpenSSL 在 PATH 中，或通过 `AAS_OPENSSL` 指定可执行文件。
+
+```sh
+cargo test --locked -- --include-ignored
+cargo build --locked
+npm ci --prefix dsh-plugin --ignore-scripts
+npm run typecheck --prefix dsh-plugin
+npm run build --prefix dsh-plugin
+npm test --prefix dsh-plugin
+node --test tests/broker.test.mjs tests/plugin-router.integration.mjs
+```
+
+Rust 迁移前的模拟基线已在隔离的 Ubuntu 环境用 OpenSSH 和两个 DSH 插件验证 MCP 回调与旧代次排空，并在官方 Linux agy 1.5.3 的空白 HOME 中验证代理发现、ACP v1 初始化和未登录分类。上述基线与本节 Rust 验证均使用模拟会话或空白账号环境。
+
+### 现场验收条件
 
 | 验收项 | 环境 | 通过条件 |
 | --- | --- | --- |
@@ -51,4 +74,4 @@
 | 直连回归与回退 | 模拟、实机 | 可关闭代理模式恢复原配置，用相同 DSH 入口验证直连回复。 |
 | QQ 验收 | 仅在 DSH 接入 QQ 时 | 从原 QQ 聊天发一条测试消息并在原聊天收到回复，记录测试结果与脱敏路由证据。 |
 
-真实部署需要在两个独立 Linux 服务用户中完成 Google 登录，并为每台参与验收的 DSH 配置自己的 SSH 密钥及对应反向端口。先在测试配置启用代理并通过上表，再切换日常入口。需要回退时关闭代理并恢复原直连配置，在原入口确认回复。验收只记录版本、状态、账号代号、耗时和结果，凭据及聊天正文留在实际运行环境。
+真实部署需要在两个独立 Linux 服务用户和各自的持久 HOME 中完成 Google 登录，并为每台参与验收的 DSH 配置自己的 SSH 密钥及对应反向端口。先在测试配置启用代理并通过上表，再切换日常入口。需要回退时关闭代理并恢复原直连配置，在原入口确认回复。验收只记录版本、状态、账号代号、耗时和结果，凭据及聊天正文留在实际运行环境。

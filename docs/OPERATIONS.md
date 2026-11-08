@@ -1,76 +1,98 @@
-# Linux 部署、验收与回退
+# 部署、验收与回退
 
-Sylvie 的共享目录是开发检出。服务部署时从 Git 拉取到目标 Linux 服务器，并使用服务器实际的 SSH 地址与端口。以下命令用于部署和验收；当前未连接该服务器，也未更改现有 DSH 的直连配置。
+## Docker 主机
 
-## 构建
+Linux 使用 Docker Engine 与 Compose v2。Windows 使用 Docker Desktop 的 Linux 容器模式和 WSL 2 后端。先用 `docker info --format '{{.OSType}}/{{.Architecture}}'` 确认引擎是 Linux，使用 AMD64 或 ARM64。以下 `docker compose` 命令可直接在 PowerShell 或 Linux shell 中运行。两种主机都使用同一套 Linux 镜像。DSH 插件安装在各自的 DSH 主机上。[Docker Desktop Windows 安装](https://docs.docker.com/desktop/setup/install/windows-install/) · [Compose 网络模式](https://docs.docker.com/compose/how-tos/networking/#change-the-network-mode)
 
-在服务器或同平台构建环境安装 Node.js `>=22.19`、npm 和 OpenSSL。安装目标架构的 [官方 Antigravity CLI](https://antigravity.google/docs/install?tab=cli)。核对服务器上的 `agy --version`、`agy acp --help` 和 OpenSSH 版本，以及两个 DSH 主机的实际 DSH 与 SSH 客户端版本。当前插件兼容测试使用 DSH 0.2.1-rc.5；Windows 开发检出中的 agy 1.5.3 与 [Google 发布清单](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/windows_amd64.json) 校验一致，Linux 安装须重新核对。
-
-~~~sh
-git clone --branch codex/initialize-account-switcher --single-branch https://github.com/shirolabs67/AntigravityAccountSwitcher.git
-cd AntigravityAccountSwitcher
-npm ci
-npm test
-npm run build
-cd dsh-plugin
-npm ci --ignore-scripts
-npm run typecheck
-npm run build
-npm test
-cd ..
-npm run test:integration
-~~~
-
-生产运行的路由器只依赖 Node.js 内置模块。把根目录的 `dist/` 放到管理员控制的只读执行目录，例如 `/opt/antigravity-account-switcher/dist`。插件分别在两个 DSH 的测试配置中安装；见 [插件说明](../dsh-plugin/README.md)。
-
-## 账号和回环认证
-
-1. 在**同一台 Linux 服务器**上为两个 Google 账号各准备一个独立的非 root 用户，例如 `aas-account-a`、`aas-account-b`。给两人独立的 HOME、专用工作目录和配置。分别切换到对应登录身份，使用官方 CLI 完成 Google 登录。不要复制 OAuth 缓存。按 [账号 worker 说明](WORKER.md) 用各自身份和实际工作目录验证额度、ACP 和专用工具策略。
-2. 创建路由器身份 `aas-router`，再为各 DSH 的 SSH 固定入口配置独立的最小权限身份。将 [样例](../examples) 复制到各角色的本机配置目录，填入账号顺序、精确 DSH 模型 ID 与 `/usage` 组名的映射、阈值及回调端口。每个 worker 配置的 `runAsUser` 应与实际用户一致；相对路径以对应配置文件目录为准。
-3. 使用部署 CA，或在管理员专用目录下生成仅供此项目使用的证书。以下命令中替换输出路径；父目录须事先只有管理员能读写。把各角色自己的 `pki/` 复制到对应配置目录。仅该角色可读自己的私钥，`ca-admin/` 留给管理员。将 `fingerprints.json` 的 SHA-256 指纹和服务名填入配置。路由器在 `127.0.0.1` 上验证双向 TLS，并按客户端证书绑定角色和代号。轮换证书时同时更新相应指纹并重启。
-
-   ~~~sh
-   node tools/new-local-certificates.mjs --output <管理员目录下的新目录> \
-     --account account-a --account account-b --instance dsh-a --instance dsh-b
-   ~~~
-
-先以各自身份前台运行以下两个命令进行预检。两个 worker 各运行一份，使用自己的配置路径：
+从 Git 检出本仓库后，在仓库根目录构建。
 
 ~~~sh
-node dist/cli.js serve <router.json>
-node dist/cli.js worker <worker.json>
+docker compose config --quiet
+docker compose build
 ~~~
 
-服务器使用 systemd 时，可从 [路由器示例单元](../examples/systemd/aas-router.service) 和 [worker 模板](../examples/systemd/aas-worker@.service) 开始。确认 Node 可执行文件路径、配置路径、用户和所有权。以 worker 单元实际身份验证 HOME、额度和 ACP，再启用开机启动及失败重启。Worker 断线会令已提交轮次失败，不会自动重放。
+多阶段构建使用锁定的 Rust 依赖编译发布版 `aas`。三个运行时镜像分别用于路由器、OpenSSH 入口和账号 worker。worker 镜像包含通过 SHA-512 校验的官方 Linux agy 1.5.3。构建工具和源码留在构建阶段。基础镜像按摘要固定，Debian 软件包取自固定日期的签名快照。镜像内禁用 agy 的自更新，更新时按官方发布清单同步替换版本、下载地址与 SHA-512，再重新构建镜像。Node.js 仅用于 DSH 插件、离线证书工具和部分测试。
 
-## OpenSSH 和 MCP
+## 准备配置与证书
 
-每个 DSH 准备自己的 SSH 私钥、该实例的专用服务端回环端口和通过可信渠道核对过的 `known_hosts`。端口使用服务端实际监听端口，和反向转发的回环端口是两个不同的配置。
+在宿主机创建管理员专用目录。使用部署 CA，或在已安装 Node.js 与 OpenSSL 的管理终端运行以下命令，生成项目专用的证书。用真实路径替换命令中的输出目录，该路径的父目录需要事先设为仅管理员可读写。
 
-服务端在该入口身份的 `authorized_keys` 写入专用公钥，固定命令使用绝对路径指向对应实例的入口配置。下面以 dsh-a 为例；dsh-b 使用另一份凭据、配置和端口。固定命令不读客户端提供的 argv、环境变量或 ACP 自报身份。入口身份只应能读取自己的 TLS 材料，代码和授权文件由管理员控制写权限。
+~~~sh
+node tools/new-local-certificates.mjs --output <新的私有证书目录> --account account-a --account account-b --instance dsh-a --instance dsh-b
+~~~
+
+证书生成后，将对应角色的 `pki/` 布置到以下目录。默认配置根目录为仓库内已忽略的 `.local/docker`，也可以通过 `AAS_CONFIG_DIR` 指定其他目录。SSH 的两个 `ingress/` 角色目录取自工具生成的 `ingress-dsh-a` 和 `ingress-dsh-b`。
 
 ~~~text
-restrict,port-forwarding,permitlisten="127.0.0.1:43101",command="/usr/bin/node /opt/antigravity-account-switcher/dist/cli.js ingress /etc/antigravity-account-switcher/dsh-a/ingress.json" ssh-ed25519 <该实例的公钥>
+.local/docker/
+  router/router.json
+  router/pki/
+  worker-account-a/worker.json
+  worker-account-a/pki/
+  worker-account-b/worker.json
+  worker-account-b/pki/
+  ssh/dsh-a/ingress.json
+  ssh/dsh-a/pki/
+  ssh/dsh-a/authorized_keys
+  ssh/dsh-b/ingress.json
+  ssh/dsh-b/pki/
+  ssh/dsh-b/authorized_keys
 ~~~
 
-用仅匹配两个入口用户的规则要求公钥认证，设置 `AllowTcpForwarding remote`、`GatewayPorts no`、`AllowStreamLocalForwarding no`，禁用 PTY、X11、代理转发和隧道。检查已有 `ForceCommand` 不覆盖每把公钥的固定命令。OpenSSH 配置变更前先保留备份，用服务器实际使用的 `sshd -t` 检查后再重载。[OpenSSH 服务端配置](https://man.openbsd.org/sshd_config.5) · [每把密钥的监听约束](https://man.openbsd.org/sshd.8#permitlisten)
+复制 [JSON 示例](../examples/) 到上述位置，使用 `fingerprints.json` 填好证书指纹和 `serverName`。保留示例的 `pki/` 相对路径和文件名。设置实际的 DSH 模型 ID 和精确的 `/usage` 组名。Compose 使用路由端口 `43000`，`dsh-a` 与 `dsh-b` 的 `mcpPort` 分别为 `43101` 和 `43102`。worker 的 `agyPath` 设为 `/usr/local/bin/agy`，`cwd` 设为 `/var/lib/aas/worker/workspace`，`runAsUser` 分别设为 `aas-worker-a` 和 `aas-worker-b`。
 
-在两个测试 DSH 安装插件，将 [代理配置示例](../examples/dsh-proxy.example.json) 合并到各自插件条目的 `config`。填入实际 SSH 主机、端口和账户名，以及各自 SSH 私钥、可信主机密钥文件的绝对路径。插件先绑定自己的 MCP 回环端口，再用下面的模式启动 SSH；客户端不提交远程命令。
+每个 `authorized_keys` 文件写入该 DSH 实例自己的 SSH **公钥**。配对的私钥由 DSH 主机持有。宿主机以只读方式分别挂载每个角色的配置，容器启动时将本角色的文件放入具有 Linux 权限控制的临时目录。`ca-admin/` 留在管理员专用目录，容器只读取对应的叶证书和 CA 公钥证书。证书轮换时同时更换相应指纹，然后重建全部服务容器。
+
+默认只在宿主机 `127.0.0.1:2222` 发布 SSH。对于远端 DSH，在仓库根目录的私有 `.env` 中设置 `AAS_SSH_BIND` 为可供 DSH 访问的宿主机地址，按需用 `AAS_SSH_PORT` 更改宿主端口，并在宿主防火墙中允许相应来源。容器内端口仍是 `2222`。路由器、两个 worker 和 sshd 共享容器网络命名空间。mTLS 路由及 MCP 反向隧道监听在该命名空间的回环地址。每个角色的文件系统、进程空间和账号 HOME 由各自的容器隔离。
+
+## 登录并启动
+
+先启动 SSH，再在对应 worker 的持久 HOME 中交互登录。
 
 ~~~sh
-ssh -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-  -o ExitOnForwardFailure=yes -p <SSH端口> -i <该实例私钥> \
-  -R 127.0.0.1:43101:127.0.0.1:<本地桥端口> <入口身份>@<SSH主机>
+docker compose up -d ssh
+docker compose run --rm --no-deps worker-a agy acp --login
+docker compose run --rm --no-deps worker-b agy acp --login
+docker compose run --rm --no-deps -T --interactive=false worker-a agy -p /usage --output-format json
+docker compose run --rm --no-deps -T --interactive=false worker-b agy -p /usage --output-format json
+docker compose up -d
+docker compose ps
 ~~~
 
-ACP 通过标准输入输出，MCP 通过反向回环转发。验证实例无法绑定其他实例的端口、非回环监听或本地转发。SSH 端口绑定成功后，再实际调用 MCP：应保留路径和鉴权，错误令牌或另一会话的原生 ID 必须被拒绝。[ACP stdio](https://agentclientprotocol.com/protocol/v1/transports) · [OpenSSH 客户端选项](https://man.openbsd.org/ssh_config.5#ExitOnForwardFailure)
+先在终端打开 CLI 给出的 URL，登录与该 worker 对应的 Google 账号，再把一次性代码交给 CLI。Windows 与 Linux 主机上均使用容器自己的 HOME 和凭据存储。Compose 为两个 worker 建立不同的命名卷。登录后用新的非交互进程探测额度，并在重建 worker 后复核持久性。见 [账号 worker 验收](WORKER.md)。
 
-## 两账号、两 DSH 的实机验收
+SSH 主机密钥由第一次启动时生成并保存在独立卷。管理员可通过 `docker compose exec -T ssh cat /var/lib/aas/ssh/ssh_host_ed25519_key.pub` 从可信终端取出主机公钥，再向 DSH 管理员核对该值和端口。把核对后的 SSH 主机记录加入 DSH 所用的 `known_hosts`。保持命名卷可在容器重建时保留 SSH 身份和登录状态。
 
-1. 确认两个 Linux worker 能各自运行真实 `/usage`、初始化 ACP 并回复，第二次 Google 登录不会改变第一个 worker 的身份。两台 DSH 各发一条含不同测试标记的消息并调用测试 MCP 工具，检查流式回复、权限和回调都归原实例。
-2. 让聊天甲在账号 A 的工具调用上等待，再让第二台 DSH 的聊天乙触发 A 低于阈值且 B 达标的场景。必要时在隔离测试环境根据实测额度调阈值。乙应立即由 B 回复；甲的工具回填和续写仍由 A 完成。甲的下一条消息由 B 带着甲自己的历史生成；旧代次的 `agy acp` 子进程应在所有轮次与回调结束后退出。
-3. 在提交 prompt 后断开测试连接。用户应看到结果未知，工具只执行一次，重连只承接新请求。若此 DSH 接入 QQ，从原聊天发一条测试消息并确认原聊天收到回复。日志只记录测试代号、版本和结果，避免写入凭据或聊天正文。
+## DSH 插件与反向回调
 
-## 回退
+在各 DSH 的测试配置中按 [插件说明](../dsh-plugin/README.md) 安装插件，将 [代理示例](../examples/dsh-proxy.example.json) 合并到该插件条目的 `config`。填写 Docker 主机地址、发布的 SSH 端口、入口账号，以及该 DSH 的私钥和 `known_hosts` 的绝对路径。插件先启动自己的回环 MCP 桥，再按以下方式启动 SSH。客户端省略远程命令。
 
-停止代理的新请求，等待活跃轮次及回调结束，或按 DSH 的取消流程结束测试轮次。在受影响的 DSH 中删除 `config.proxy` 并重载，或恢复已备份的直连配置；聊天历史仍在 DSH。使用同一实际入口验证直连回复，再停止路由器和 worker，撤销新增的 SSH 公钥或匹配配置。
+~~~sh
+ssh -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -p <SSH端口> -i <该实例私钥> -R 127.0.0.1:43101:127.0.0.1:<本地桥端口> dsh-a@<SSH主机>
+~~~
+
+[容器 SSH 配置](../deploy/docker/sshd_config) 为每个入口用户设置固定命令和允许监听的回环端口。验收时尝试绑定另一实例的端口或非回环地址，确认 SSH 拒绝请求。正常连接建立后，从工具调用验证反向转发，并检查 MCP 路径、鉴权和原生会话标识。[OpenSSH 客户端选项](https://man.openbsd.org/ssh_config.5#ExitOnForwardFailure) · [OpenSSH 服务端转发配置](https://man.openbsd.org/sshd_config.5#PermitListen) · [ACP stdio](https://agentclientprotocol.com/protocol/v1/transports)
+
+## Linux 原生部署
+
+需要沿用现有 OpenSSH 和 systemd 时，可在 Linux 上用 `cargo build --release --locked --bin aas` 构建二进制，安装到管理员控制的 `/opt/antigravity-account-switcher/bin/aas`。分配独立非 root worker 用户和 HOME，再准备路由器、入口用户和各自的 TLS 配置。参考 [systemd 示例](../examples/systemd/) 与 [原生 worker 安装](WORKER.md#linux-原生安装)。各服务以实际运行身份执行 `aas serve <router.json>` 或 `aas worker <worker.json>`。
+
+在入口用户的 `authorized_keys` 为每把公钥配置固定命令。以 `dsh-a` 为例。
+
+~~~text
+restrict,port-forwarding,permitlisten="127.0.0.1:43101",command="/opt/antigravity-account-switcher/bin/aas ingress /etc/antigravity-account-switcher/dsh-a/ingress.json" ssh-ed25519 <该实例的公钥>
+~~~
+
+对入口用户要求公钥认证，设置 `AllowTcpForwarding remote`、`GatewayPorts no`、`AllowStreamLocalForwarding no`，并禁用 PTY、X11、代理转发和隧道。核对现有 `ForceCommand` 与固定命令的优先级。修改前备份配置，用目标主机上的 `sshd -t` 校验后重载。
+
+## 两账号、两台 DSH 的实机验收
+
+1. 记录 Docker、OpenSSH、agy、DSH 和插件的实际版本。在两个真实 worker 中检查各自的 `/usage` 与 ACP 回复。分别从两台 DSH 发消息并调用测试 MCP 工具，核对流式回复、权限事件和回调的归属。
+2. 让聊天甲在账号 A 上等待工具结果，再让聊天乙触发 A 低于阈值且 B 达标的场景。乙应由 B 回复，甲的工具回填和续写应在 A 上完成。甲的下一轮应在 B 上只重建甲自己的聊天历史。旧代次的 agy 子进程在所有相关轮次与回调结束后退出。
+3. 提交 prompt 后断开测试连接。确认该轮报告结果未知，工具只执行一次，重连只承接新请求。若 DSH 接入 QQ，从原聊天发送测试消息并确认同一聊天收到回复。记录测试代号、版本、耗时和结果。
+
+## 更新与回退
+
+更新镜像或配置前先停止新请求，等待活跃轮次及回调结束。在仓库根目录运行 `docker compose build`，再用 `docker compose up -d --force-recreate` 同时重建角色，使各容器重新加入 SSH 的网络命名空间。
+
+回退时在受影响的 DSH 删除 `config.proxy` 并重载，或恢复已备份的直连配置。用同一实际入口验证直连回复，再运行 `docker compose down`，保留命名卷供恢复时使用。原生部署则停止相关服务并撤销新增的 SSH 公钥或匹配规则。聊天历史由 DSH 持有。
