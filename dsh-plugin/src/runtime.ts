@@ -31,7 +31,7 @@ import {
 import { QuotaReader, type QuotaSnapshot } from './quota.ts'
 import {
   acquireProxyTurn, assertProxyCapability, proxyArgv, proxyError, proxyMeta, proxyNativeSessionId,
-  proxyRouteKey, releaseProxyTurn, submissionUnknown, type ProxyLease,
+  proxyRouteKey, releaseProxyTurn, submissionUnknown, type AntigravityGenerateOptions, type ProxyLease,
 } from './proxy.ts'
 import { peekMaxModelStepIdx, readModelStepsAfter, sessionDbPath } from './usage-db.ts'
 import { delay, digest, KeyedMutex } from './util.ts'
@@ -151,10 +151,12 @@ export class AntigravityRuntime {
   private sweeper: ReturnType<typeof setInterval> | undefined
   private lastTurn: RuntimeStatus['lastTurn']
   private overrides: LiveOverrides = {}
+  private switchAccountOnNextTurn: boolean
   private disposed = false
 
   /** @param host - host services. */
   constructor(private readonly host: RuntimeHost) {
+    this.switchAccountOnNextTurn = host.config.proxy?.switchAccountOnNextTurn === true
     this.home = host.config.home.length > 0 ? host.config.home : defaultHome()
     this.catalog = new ModelCatalog(join(this.home, 'catalog.json'))
     this.bridge = new McpBridge({
@@ -311,10 +313,14 @@ export class AntigravityRuntime {
    * @param options - the model request.
    * @yields stream chunks.
    */
-  async * stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
+  async * stream(options: AntigravityGenerateOptions): AsyncGenerator<StreamChunk> {
     if (options.signal?.aborted === true) {
       yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'Request aborted', code: 'ABORTED' } } }
       return
+    }
+    const switchRequested = options._meta?.antigravityAccountSwitcher?.switchAccount === true
+    if (switchRequested && !this.usesProxy) {
+      throw new LlmError('Account switching requires Account Switcher proxy mode.', 'PROXY_ACCOUNT_SWITCH_DISABLED')
     }
     // Purposes are declared by producer packages this plugin does not import.
     const declaredPurpose = (options as { purpose?: string }).purpose
@@ -366,7 +372,13 @@ export class AntigravityRuntime {
         // Dropped turns must give up their lease before the same chat can
         // acquire a fresh one. Successful tool resumption returned above.
         await this.releaseTurn(conv, proc)
-        conv.proxyLease = await acquireProxyTurn(proc, key, options.model)
+        if (requestAborted(options.signal)) {
+          yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'Request aborted', code: 'ABORTED' } } }
+          return
+        }
+        const switchArmed = this.switchAccountOnNextTurn && purpose === MAIN_PURPOSE
+        if (switchArmed) this.switchAccountOnNextTurn = false
+        conv.proxyLease = await acquireProxyTurn(proc, key, options.model, switchRequested || switchArmed)
         if (conv.proxyRoute !== proxyRouteKey(conv.proxyLease)) conv.dirty = true
       }
       if (this.usesProxy && requestAborted(options.signal)) {

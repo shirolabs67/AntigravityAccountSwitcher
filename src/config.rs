@@ -11,7 +11,7 @@ use rustls::{ClientConfig as TlsClientConfig, RootCertStore, ServerConfig as Tls
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::router::RouterConfig;
+use crate::router::{InstanceConfig, RouterConfig};
 use crate::wire::PeerError;
 
 const MAX_FILE: u64 = 256 * 1024;
@@ -205,8 +205,20 @@ pub fn broker(path: &Path) -> Result<BrokerConfig, PeerError> {
         if !ports.insert(mcp_port) {
             return Err(invalid("mcp_port"));
         }
+        let allow_account_switch = match row.get("allowAccountSwitch") {
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| invalid("allow_account_switch"))?,
+            None => false,
+        };
         register(&row["fingerprint256"], Identity::Ingress(id.clone()))?;
-        instances.insert(id, mcp_port);
+        instances.insert(
+            id,
+            InstanceConfig {
+                mcp_port,
+                allow_account_switch,
+            },
+        );
     }
     let mut model_groups = HashMap::new();
     let models = record(&raw["modelGroups"], "model_groups")?;

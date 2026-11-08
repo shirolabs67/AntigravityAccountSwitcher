@@ -28,10 +28,15 @@ const MAX_PENDING_REQUESTS: usize = 512;
 
 pub struct RouterConfig {
     pub accounts: Vec<String>,
-    pub instances: HashMap<String, u16>,
+    pub instances: HashMap<String, InstanceConfig>,
     pub model_groups: HashMap<String, String>,
     pub threshold: f64,
     pub exhausted_message: String,
+}
+
+pub struct InstanceConfig {
+    pub mcp_port: u16,
+    pub allow_account_switch: bool,
 }
 
 #[async_trait]
@@ -185,7 +190,7 @@ impl Router {
         instance: &str,
         emit: impl Fn(Value) -> Result<(), PeerError> + Send + 'static,
     ) -> Result<RouterConnection, PeerError> {
-        let port = *self
+        let config = self
             .0
             .config
             .instances
@@ -197,7 +202,8 @@ impl Router {
         let connection = Connection {
             router: self.clone(),
             instance: instance.into(),
-            port,
+            port: config.mcp_port,
+            allow_account_switch: config.allow_account_switch,
             emit: Box::new(emit),
             events,
             shutdown: shutdown.clone(),
@@ -219,6 +225,7 @@ impl Router {
         instance: &str,
         chat: &str,
         model: &str,
+        switch_account: bool,
     ) -> Result<impl Future<Output = Result<Lease, RpcFault>> + Send + 'static + use<>, RpcFault>
     {
         let group = self
@@ -243,7 +250,9 @@ impl Router {
                     }
                 }
             };
-            router.select_account(key.1, model, &group, lock).await
+            router
+                .select_account(key.1, model, &group, switch_account, lock)
+                .await
         })
     }
 
@@ -252,14 +261,21 @@ impl Router {
         chat: String,
         model: String,
         group: &str,
+        switch_account: bool,
         chat_lock: ChatLock,
     ) -> Result<Lease, RpcFault> {
         let routing = &self.0;
         let mut selection = routing.selection.lock().await;
+        if switch_account && selection.current.is_none() {
+            return Err(RpcFault::new(
+                -32044,
+                "Establish a current account with a normal turn before requesting a switch",
+                Some(json!({"kind": "account_switch_unavailable", "reason": "no_current_account"})),
+            ));
+        }
         let mut unknown = Vec::new();
         let accounts = &routing.config.accounts;
-
-        for offset in 0..accounts.len() {
+        for offset in usize::from(switch_account)..accounts.len() {
             let index = (selection.start + offset) % accounts.len();
             let account = &accounts[index];
             let failure = match routing.workers.probe(account, group).await {
@@ -285,6 +301,13 @@ impl Router {
                 Err(error) => quota_failure(error.category()),
             };
             unknown.push(json!({"accountId": account, "reason": failure}));
+        }
+        if switch_account {
+            return Err(RpcFault::new(
+                -32044,
+                "No alternate account meets the quota requirements",
+                Some(json!({"kind": "account_switch_unavailable", "accounts": unknown})),
+            ));
         }
         if !unknown.is_empty() {
             return Err(RpcFault::new(
@@ -524,6 +547,7 @@ struct Connection {
     router: Router,
     instance: String,
     port: u16,
+    allow_account_switch: bool,
     emit: Box<dyn Fn(Value) -> Result<(), PeerError> + Send>,
     events: mpsc::Sender<Event>,
     shutdown: CancellationToken,
@@ -665,7 +689,10 @@ impl Connection {
             backend_init["clientInfo"] = client_info.clone();
         }
         self.initialized = Some(backend_init);
-        let capability = json!({(EXTENSION): {"version": 1}});
+        let mut capability = json!({(EXTENSION): {"version": 1}});
+        if self.allow_account_switch {
+            capability[EXTENSION]["switchAccount"] = json!(true);
+        }
         Ok(json!({
             "protocolVersion": 1,
             "agentInfo": {"name": "Antigravity Account Switcher", "version": env!("CARGO_PKG_VERSION")},
@@ -696,7 +723,22 @@ impl Connection {
         let (Some(chat), Some(model)) = (chat, model) else {
             return Err(invalid("chatKey and model are required"));
         };
-        let pending = self.router.start_acquire(&self.instance, chat, model)?;
+        let switch_account = match params["_meta"][EXTENSION].get("switchAccount") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| invalid("switchAccount must be a boolean"))?,
+        };
+        if switch_account && !self.allow_account_switch {
+            return Err(RpcFault::new(
+                -32043,
+                "Account switching is disabled for this DSH instance",
+                Some(json!({"kind": "account_switch_disabled"})),
+            ));
+        }
+        let pending = self
+            .router
+            .start_acquire(&self.instance, chat, model, switch_account)?;
         let events = self.events.clone();
         tokio::spawn(async move {
             let result = tokio::select! {

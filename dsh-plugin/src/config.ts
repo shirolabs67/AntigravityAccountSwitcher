@@ -70,6 +70,7 @@ export const Config: z<Config> = z.object({
     remotePort: z.number().step(1).min(1).max(65535).required(),
     identityFile: z.string().required(),
     knownHostsFile: z.string().required(),
+    switchAccountOnNextTurn: z.boolean().default(false),
   })]),
   home: z.string().default(''),
   contextWindow: maybeVolatile(z.number().step(1).min(0).default(0)),

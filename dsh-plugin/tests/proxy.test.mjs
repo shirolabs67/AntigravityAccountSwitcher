@@ -13,6 +13,8 @@ import { proxyArgv } from '../lib/proxy.js'
 import { AntigravityRuntime } from '../lib/runtime.js'
 
 const extension = 'antigravityAccountSwitcher'
+const acquire = '_' + extension + '/acquireTurn'
+const switchOptions = { _meta: { [extension]: { switchAccount: true } } }
 const model = 'gemini-4-argon'
 const provider = 'antigravity'
 const message = (id, role, text, source) => ({ id, role, content: [{ type: 'text', text }], source })
@@ -31,15 +33,15 @@ const textOf = chunks => chunks.filter(chunk => chunk.type === 'text-delta').map
 const rpcMeta = params => params._meta?.[extension]
 const err = (code, message) => ({ code, message })
 
-function setup(t) {
+function setup(t, { switchAccountOnNextTurn = false, switchAccountEnabled = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'aas-plugin-'))
   const proxy = {
     host: 'router.example.test', user: 'dsh_test', remotePort: 17223,
-    identityFile: join(home, 'id test'), knownHostsFile: join(home, 'known hosts'),
+    identityFile: join(home, 'id test'), knownHostsFile: join(home, 'known hosts'), switchAccountOnNextTurn,
   }
   const state = {
     account: 'a', generation: '1', fail: undefined, quotaDetails: undefined, packets: [], arguments: [], pending: new Map(),
-    mcpRequests: [], localProbes: 0, lastSpawn: 0,
+    mcpRequests: [], localProbes: 0, lastSpawn: 0, switchError: undefined,
   }
   let nextLease = 0
   let nextSession = 0
@@ -73,10 +75,11 @@ function setup(t) {
       const update = text => write({ method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } })
       switch (method) {
         case 'initialize':
-          result({ protocolVersion: 1, _meta: { [extension]: { version: 1 } } })
+          result({ protocolVersion: 1, _meta: { [extension]: { version: 1, switchAccount: switchAccountEnabled } } })
           break
-        case '_' + extension + '/acquireTurn': {
+        case acquire: {
           if (state.fail === 'quota') return fail({ ...err(-32040, 'quota unavailable'), data: state.quotaDetails })
+          if (rpcMeta(params)?.switchAccount === true && state.switchError !== undefined) return fail(state.switchError)
           const exhausted = state.account === undefined
           const lease = {
             status: exhausted ? 'exhausted' : 'selected',
@@ -203,6 +206,39 @@ test('proxy SSH argv binds the actual loopback bridge, pins host keys, and suppl
   const normalized = Config({ proxy }).proxy
   assert.throws(() => proxyArgv({ ...normalized, host: '-oProxyCommand=evil' }, 12345), /host/)
   assert.throws(() => proxyArgv({ ...normalized, knownHostsFile: 'relative' }, 12345), /literal absolute/)
+})
+
+test('profile switch arms one new main turn and stays out of warmup, title, and tool continuation', async t => {
+  const { request, runtime, packets } = setup(t, { switchAccountOnNextTurn: true, switchAccountEnabled: true })
+  await runtime.warmup()
+  assert.equal(packets(acquire).length, 0)
+  await collect(request('chat', [user('title', 'name this chat')], { purpose: 'session-title' }))
+
+  const initial = [sys, user('main', 'PARK ONE TOOL')]
+  const step = await collect(request('chat', initial))
+  const call = step.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call').block
+  const continued = [...initial, assistant('answer', step), tool('tool-result', call.id, 'tool result')]
+  const resumed = await collect(request('chat', continued, switchOptions))
+  assert.match(textOf(resumed), /^a tool result /)
+  await collect(request('chat', [...continued, assistant('resumed', resumed), user('next', 'next question')]))
+
+  assert.deepEqual(packets(acquire).map(packet => rpcMeta(packet.params)), [undefined, { switchAccount: true }, undefined])
+  assert.ok(packets('session/prompt').every(packet => rpcMeta(packet.params)?.switchAccount === undefined))
+})
+
+test('a switch requires advertised authorization and does not fall back after rejection', async t => {
+  const unsupported = setup(t)
+  const input = [user('request', 'hello')]
+  await assert.rejects(collect(unsupported.request('chat', input, switchOptions)), { code: 'PROXY_ACCOUNT_SWITCH_DISABLED' })
+  assert.equal(unsupported.packets(acquire).length, 0)
+  assert.equal(textOf(await collect(unsupported.request('chat', input))), 'a reply')
+
+  const { request, packets, state } = setup(t, { switchAccountEnabled: true })
+  state.switchError = { ...err(-32044, 'switch failed'), data: { kind: 'account_switch_unavailable', reason: 'no_current_account' } }
+  await assert.rejects(collect(request('chat', input, switchOptions)), { code: 'PROXY_ACCOUNT_SWITCH_UNAVAILABLE', message: /Send an ordinary turn first/ })
+  assert.deepEqual(packets(acquire).map(packet => rpcMeta(packet.params)), [{ switchAccount: true }])
+  assert.equal(packets('session/prompt').length, 0)
+  assert.equal(textOf(await collect(request('chat', input))), 'a reply')
 })
 
 test('a parked tool and its callback stay with the old account while another chat switches', async t => {

@@ -31,6 +31,21 @@ npm test
 
 构建后，从仓库根目录执行 `dsh plugin --profile <测试配置名> add ./dsh-plugin`，然后重载测试配置。下文的上游 GitHub 安装命令会安装原版插件；部署代理模式请使用此目录的构建产物。
 
+### 测试主动换号
+
+在路由器为该实例启用 `allowAccountSwitch: true`，并通过普通回合选出当前账号。已有当前账号时可直接测试。要从安装了插件的 DSH 触发一次换号，在该插件的现有 `config.proxy` 中加入 `switchAccountOnNextTurn: true` 并重载测试配置。此设置作用于首个新主聊天回合的尝试，预热、辅助回合和工具续写不会消耗它。测试后移除该设置，避免插件再次加载时重新触发。见[双账号验收步骤](../docs/OPERATIONS.md#两账号两台-dsh-的实机验收)。
+
+程序化调用插件适配器时，可为新回合传入元数据。
+
+```js
+adapter.stream({
+  ...options,
+  _meta: { antigravityAccountSwitcher: { switchAccount: true } },
+})
+```
+
+插件通过租约请求把该指令发送给路由器。路由器跳过当前账号并按正常额度阈值检查其余账号。若无当前账号或无达标的备选账号，换号请求会失败。已经开始的回合继续使用各自持有的租约。
+
 以下是上游直连说明。
 
 把本机已登录的 Google Antigravity CLI（`agy`）作为 DeepSeek Harness 的一级模型 provider 接入。模型出现在输入框右下角的模型选择器里，与 DeepSeek、GLM 等直连 provider 同级使用；工具、权限、压缩、子代理全部由 DSH 负责。

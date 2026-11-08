@@ -62,7 +62,7 @@ async function link(socket, handle) {
   };
 }
 
-export async function startBroker(t, { accounts, instances, modelGroups, extraAccounts = [] }) {
+export async function startBroker(t, { accounts, instances, modelGroups, extraAccounts = [], accountSwitchInstances = [] }) {
   const directory = await mkdtemp(join(tmpdir(), 'aas-test-tls-'));
   const pki = join(directory, 'bundles');
   const port = await availablePort();
@@ -94,7 +94,11 @@ export async function startBroker(t, { accounts, instances, modelGroups, extraAc
   }
   const routerConfig = await config('router', 'router', {
     accounts: accounts.map(id => ({ id, fingerprint256: pins.workers[id] })),
-    instances: Object.fromEntries(Object.entries(instances).map(([id, mcpPort]) => [id, { mcpPort, fingerprint256: pins.ingress[id] }])),
+    instances: Object.fromEntries(Object.entries(instances).map(([id, mcpPort]) => [id, {
+      mcpPort,
+      fingerprint256: pins.ingress[id],
+      ...(accountSwitchInstances.includes(id) ? { allowAccountSwitch: true } : {}),
+    }])),
     modelGroups,
   });
   function launch(mode, path) {
