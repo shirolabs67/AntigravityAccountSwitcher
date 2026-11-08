@@ -6,6 +6,7 @@
 import { isIP } from 'node:net'
 import { basename, isAbsolute } from 'node:path'
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { AcpProcess } from './acp-process.ts'
 import { JsonRpcClosedError, JsonRpcRemoteError } from './jsonrpc.ts'
 
@@ -17,6 +18,13 @@ export interface ProxyConfig {
   remotePort: number
   identityFile: string
   knownHostsFile: string
+  /** Request a switch on the first new main turn after loading this configuration. */
+  switchAccountOnNextTurn?: boolean
+}
+
+/** Programmatic request options for this adapter. */
+export interface AntigravityGenerateOptions extends GenerateOptions {
+  _meta?: { antigravityAccountSwitcher?: { switchAccount?: boolean } }
 }
 
 export interface ProxyLease {
@@ -27,6 +35,7 @@ export interface ProxyLease {
 }
 
 const EXTENSION = 'antigravityAccountSwitcher'
+const ACQUIRE = `_${EXTENSION}/acquireTurn`
 const ACQUIRE_TIMEOUT_MS = 120_000
 const RELEASE_TIMEOUT_MS = 10_000
 
@@ -90,9 +99,14 @@ export function assertProxyCapability(result: Record<string, unknown> | undefine
   }
 }
 
-export async function acquireProxyTurn(proc: AcpProcess, chatKey: string, model: string): Promise<ProxyLease> {
-  const result = await proc.request<unknown>(`_${EXTENSION}/acquireTurn`, { chatKey, model }, ACQUIRE_TIMEOUT_MS)
+export async function acquireProxyTurn(proc: AcpProcess, chatKey: string, model: string, switchAccount: boolean): Promise<ProxyLease> {
+  if (switchAccount && extension(proc.initializeResult?._meta)?.switchAccount !== true) {
+    throw new LlmError('The Account Switcher did not enable account switching for this SSH identity.', 'PROXY_ACCOUNT_SWITCH_DISABLED')
+  }
+  const params = { chatKey, model, ...(switchAccount ? { _meta: { [EXTENSION]: { switchAccount: true } } } : {}) }
+  const result = await proc.request<unknown>(ACQUIRE, params, ACQUIRE_TIMEOUT_MS)
   if (!isRecord(result) || (result.status !== 'selected' && result.status !== 'exhausted')
+    || (switchAccount && result.status !== 'selected')
     || typeof result.leaseId !== 'string' || result.leaseId.length === 0
     || typeof result.generationId !== 'string' || result.generationId.length === 0) {
     throw new LlmError('The Account Switcher returned an invalid turn lease', 'PROXY_PROTOCOL')
@@ -179,6 +193,17 @@ function quotaFailure(data: unknown): LlmError {
 export function proxyError(error: unknown, submitted = false): LlmError | undefined {
   if (submitted && error instanceof JsonRpcClosedError) return submissionUnknown(error)
   if (!(error instanceof JsonRpcRemoteError)) return undefined
+  if (error.method === ACQUIRE && isRecord(error.rpc.data)) {
+    if (error.rpc.data.kind === 'account_switch_disabled') {
+      return new LlmError('The Account Switcher did not enable account switching for this SSH identity.', 'PROXY_ACCOUNT_SWITCH_DISABLED')
+    }
+    if (error.rpc.data.kind === 'account_switch_unavailable') {
+      const message = error.rpc.data.reason === 'no_current_account'
+        ? 'Send an ordinary turn first to select the current account before requesting a switch.'
+        : 'The Account Switcher could not select another eligible account.'
+      return new LlmError(message, 'PROXY_ACCOUNT_SWITCH_UNAVAILABLE')
+    }
+  }
   switch (error.rpc.code) {
     case -32040:
       return quotaFailure(error.rpc.data)

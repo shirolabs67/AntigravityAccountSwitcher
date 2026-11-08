@@ -21,6 +21,7 @@ import { AntigravityRemote, registerRemote } from './remote.ts'
 import { AntigravityRuntime } from './runtime.ts'
 
 export { Config } from './config.ts'
+export type { AntigravityGenerateOptions } from './proxy.ts'
 export const name = 'llm-antigravity-acp'
 export const inject = ['llm', 'subprocess']
 

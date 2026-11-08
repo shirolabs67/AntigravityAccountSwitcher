@@ -18,11 +18,13 @@
   "instances": {
     "dsh-a": {
       "mcpPort": 43101,
-      "fingerprint256": "REPLACE_WITH_INGRESS_A_SHA256"
+      "fingerprint256": "REPLACE_WITH_INGRESS_A_SHA256",
+      "allowAccountSwitch": false
     },
     "dsh-b": {
       "mcpPort": 43102,
-      "fingerprint256": "REPLACE_WITH_INGRESS_B_SHA256"
+      "fingerprint256": "REPLACE_WITH_INGRESS_B_SHA256",
+      "allowAccountSwitch": false
     }
   },
   "modelGroups": {

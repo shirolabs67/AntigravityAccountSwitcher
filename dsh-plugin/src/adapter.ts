@@ -6,10 +6,9 @@
  */
 
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
-import type {
-  GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk,
-} from '@deepseek-ai/dsh-llm'
+import type { LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { EFFORT_NAMES, nearestEffort } from './catalog.ts'
+import type { AntigravityGenerateOptions } from './proxy.ts'
 import type { AntigravityRuntime } from './runtime.ts'
 
 // DSH 0.2.1 retries TRANSPORT by default. A proxy attempt may have reached the
@@ -78,7 +77,7 @@ export class AntigravityAdapter extends LlmAdapter {
     })
   }
 
-  override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  override stream(options: AntigravityGenerateOptions): AsyncIterable<StreamChunk> {
     return this.runtime.stream(options)
   }
 }

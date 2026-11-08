@@ -37,12 +37,18 @@ test('Rust broker binds identity to the client certificate and forwards ACP over
   };
   const hello = await request(1, 'initialize', { protocolVersion: 1, clientCapabilities: {} });
   assert.equal(hello.result._meta.antigravityAccountSwitcher.version, 1);
+  assert.notEqual(hello.result._meta.antigravityAccountSwitcher.switchAccount, true);
   const acquire = await request(2, '_antigravityAccountSwitcher/acquireTurn', { chatKey: '测试', model: 'model' });
   assert.equal(acquire.result.status, 'selected');
   assert.equal(acquire.result.accountId, 'a');
   assert.equal(probes, 1);
   const release = await request(3, '_antigravityAccountSwitcher/releaseTurn', { leaseId: acquire.result.leaseId });
   assert.ok('result' in release);
+  const denied = await request(4, '_antigravityAccountSwitcher/acquireTurn', {
+    chatKey: '测试', model: 'model', _meta: { antigravityAccountSwitcher: { switchAccount: true } },
+  });
+  assert.equal(denied.error?.data?.kind, 'account_switch_disabled');
+  assert.equal(probes, 1);
   ingress.terminate();
   assert.equal((await ingress.exited).code, 0);
 });

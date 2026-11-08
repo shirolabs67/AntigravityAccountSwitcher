@@ -162,7 +162,22 @@ fn harness() -> (
     let router = Router::new(
         RouterConfig {
             accounts: vec!["a".into(), "b".into()],
-            instances: HashMap::from([("dshA".into(), 43101), ("dshB".into(), 43102)]),
+            instances: HashMap::from([
+                (
+                    "dshA".into(),
+                    InstanceConfig {
+                        mcp_port: 43101,
+                        allow_account_switch: true,
+                    },
+                ),
+                (
+                    "dshB".into(),
+                    InstanceConfig {
+                        mcp_port: 43102,
+                        allow_account_switch: false,
+                    },
+                ),
+            ]),
             model_groups: HashMap::from([(MODEL.into(), "exact-model-group".into())]),
             threshold: 0.05,
             exhausted_message: "额度测试".into(),

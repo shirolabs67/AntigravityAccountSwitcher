@@ -55,7 +55,7 @@ flowchart TD
 
 | 组件 | 约束 |
 | --- | --- |
-| 额度选择器 | 显式匹配模型组。两个窗口都要返回有效的 0–1 比例，`min(weekly, fiveHour) >= threshold` 才可用；探测失败不能当作低额度。整圈无可用且至少一次探测失败时，报探测错误。 |
+| 额度选择器 | 显式匹配模型组。两个窗口都要返回有效的 0–1 比例，`min(weekly, fiveHour) >= threshold` 才可用；探测失败不能当作低额度。普通准入整圈无可用且至少一次探测失败时，报探测错误。获准主动换号时跳过当前账号，检查其后的候选账号。 |
 | 轮次协调器 | 同一连接内，同一聊天与用途只有一个活跃租约。更新共享当前账号和分配租约是同一次决定；租约持有具体账号进程代次，随后其他聊天切号不改变它。 |
 | ACP 会话代理 | 保存代理会话与原生会话的绑定。双向 RPC 分别转换请求 ID，转换引用请求的取消消息；权限结果只可回到发起连接和会话。 |
 | MCP 地址改写 | 只将允许的回环桥地址改为该实例预先分配的 Linux 服务器回环地址；原路径、会话鉴权保留。DSH 使用 agy 原生会话 ID 校验工具，继续用代理会话 ID 处理 ACP。 |
@@ -87,7 +87,8 @@ classDiagram
 - 客户端通过 `_antigravityAccountSwitcher/acquireTurn` 申请本轮，获得仅对本连接有效的租约、账号代次和选择结果；`_antigravityAccountSwitcher/releaseTurn` 在 DSH 轮次结束后释放。连接断开会取消并清理其租约；服务端须对重复释放保持幂等。
 - `Session` 按 `(authenticatedInstance, connectionId, proxySessionId)` 查找。两侧 JSON-RPC 请求的编号空间独立，取消和权限请求使用对应方向的映射。
 - ACP 规范之外的扩展必须显式协商。客户端把租约关联到会话创建和本轮请求，不把聊天历史放入额外的账号数据库。
-- 无可用且确认全部耗尽时，代理可提供不启动 agy 的合成会话，按 `agent_message_chunk`、`stopReason: end_turn` 结束；插件仍走普通回复路径，并在之后真正选中账号时重建会话。
+- 路由器按已认证实例检查 `allowAccountSwitch`，默认关闭。授权时在初始化响应声明 `_meta.antigravityAccountSwitcher.switchAccount: true`。客户端在 `acquireTurn` 的同一元数据路径传入 `true` 即请求换号。该请求只影响新租约，已有租约仍由原账号完成。此元数据由路由器处理。
+- 普通准入无可用且确认全部耗尽时，代理可提供不启动 agy 的合成会话，按 `agent_message_chunk`、`stopReason: end_turn` 结束；插件仍走普通回复路径，并在之后真正选中账号时重建会话。
 
 Rust 连接任务按序接收 ACP 帧，并在额度探测、进程启动或等待 ACP 响应时继续处理取消、断线和权限回调。代理与 worker 的内部链路为有界逐行 JSON，使用 TLS 1.3 进行双向认证并校验证书 SHA-256 指纹。入口仅将 ACP 帧写入 stdout。
 
@@ -105,8 +106,8 @@ sequenceDiagram
   A->>R: 申请本轮并启动生成
   R->>X: 固定 A 的租约与原生会话
   X-->>A: 经专属 MCP 回环转发调用工具
-  B->>R: 申请新轮次
-  R->>X: 探测目标模型组，低于阈值
+  B->>R: 申请新轮次，附上获准的换号元数据
+  Note over R,X: 跳过当前账号
   R->>Y: 探测达标，切换共享当前账号
   R-->>B: 签发新账号租约
   B->>Y: 通过路由器开始新轮次
