@@ -69,6 +69,7 @@ impl RouterConnection {
     }
 }
 
+// 以认证实例和聊天为键，同一实例重连时也要等该聊天的旧租约释放。
 type ChatKey = (String, String);
 type Chats = Mutex<HashMap<ChatKey, watch::Sender<()>>>;
 
@@ -100,6 +101,7 @@ impl Drop for ChatLock {
     }
 }
 
+// 切号后，旧代际仍供已持有租约的轮次使用，最后一个租约释放才通知后端退出。
 struct Generation {
     id: Uuid,
     account: String,
@@ -131,6 +133,7 @@ struct Lease {
     id: String,
     model: String,
     chat: String,
+    // 整圈确认额度不足时使用无后端的租约，由路由器直接返回固定回复。
     generation: Option<Arc<Generation>>,
     _chat_lock: ChatLock,
     session: Option<String>,
@@ -265,6 +268,7 @@ impl Router {
         chat_lock: ChatLock,
     ) -> Result<Lease, RpcFault> {
         let routing = &self.0;
+        // 串行完成额度探测、当前账号更新和租约登记，确保一次准入观察到同一个轮询起点。
         let mut selection = routing.selection.lock().await;
         if switch_account && selection.current.is_none() {
             return Err(RpcFault::new(
@@ -275,6 +279,7 @@ impl Router {
         }
         let mut unknown = Vec::new();
         let accounts = &routing.config.accounts;
+        // 主动换号跳过当前账号，仍按配置顺序探测备选账号并执行相同的额度校验。
         for offset in usize::from(switch_account)..accounts.len() {
             let index = (selection.start + offset) % accounts.len();
             let account = &accounts[index];
@@ -303,6 +308,7 @@ impl Router {
             unknown.push(json!({"accountId": account, "reason": failure}));
         }
         if switch_account {
+            // 备选账号均不可用时，保留当前账号供普通轮次继续申请。
             return Err(RpcFault::new(
                 -32044,
                 "No alternate account meets the quota requirements",
@@ -436,6 +442,7 @@ fn mcp_servers(raw: &Value, port: u16) -> Result<Value, RpcFault> {
         .and_then(valid_bridge_url)
         .filter(|_| bearer.is_some_and(|value| valid_hex(value, 48)))
         .ok_or_else(|| invalid("Invalid DSH MCP bridge address or authorization format"))?;
+    // 目标端口来自认证实例的 SSH 反向转发配置，沿用插件生成的路径和鉴权头。
     Ok(json!([{
         "type": "http",
         "name": "dsh",
@@ -447,6 +454,7 @@ fn mcp_servers(raw: &Value, port: u16) -> Result<Value, RpcFault> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SlotKey {
     generation: Uuid,
+    // 同一代际可能重新连接后端，独立标识防止旧连接的迟到事件作用于新连接。
     id: Uuid,
 }
 
@@ -543,6 +551,7 @@ enum Event {
     Completed(SlotKey, RpcId, Operation, Result<Value, BackendError>),
 }
 
+// 每条认证连接的会话、租约和请求映射由同一事件循环维护。
 struct Connection {
     router: Router,
     instance: String,
@@ -729,6 +738,7 @@ impl Connection {
                 .as_bool()
                 .ok_or_else(|| invalid("switchAccount must be a boolean"))?,
         };
+        // 初始化能力只告知客户端是否支持换号，准入时仍按认证实例的配置校验授权。
         if switch_account && !self.allow_account_switch {
             return Err(RpcFault::new(
                 -32043,
@@ -768,6 +778,7 @@ impl Connection {
                     json!({"status": "exhausted", "leaseId": lease.id, "generationId": "exhausted"})
                 }
                 Some(generation) => {
+                    // 当前代际的后端失效后，向此连接公布新标识，提示插件按 DSH 历史重建会话。
                     let revision = self
                         .revisions
                         .get(&generation.id)
@@ -911,6 +922,7 @@ impl Connection {
             .get(session_id)
             .ok_or_else(|| stale("Unknown or expired ACP session"))?;
         let lease = self.require_lease(params)?;
+        // 同一聊天在同一代际中才能复用会话，租约与会话保持一对一绑定。
         if session.chat != lease.chat
             || session.generation != lease.generation.as_ref().map(|route| route.id)
             || lease.session.as_deref().is_some_and(|id| id != session_id)
@@ -1330,6 +1342,7 @@ impl Connection {
             .get_mut(&session)
             .unwrap()
             .observe_model(&result);
+        // ACP 使用代理会话 ID，DSH 的 MCP 桥用原生 ID 校验 agy 发起的调用。
         result["sessionId"] = json!(session);
         if !result["_meta"].is_object() {
             result["_meta"] = json!({});
@@ -1390,6 +1403,7 @@ impl Connection {
                     "Account worker timed out configuring the ACP session",
                 ))
             }
+            // 已提交的 prompt 可能执行过工具，断线后用专用错误让插件终止本轮。
             Err(BackendError::Disconnected) if prompting => Err(submission_unknown()),
             Err(BackendError::Fault(fault))
                 if prompting && fault.code == -32603 && self.available_backend(key).is_none() =>
@@ -1470,6 +1484,7 @@ impl Connection {
     }
 
     fn finish_release(&mut self, id: &str) {
+        // ACP 操作和反向权限回调全部收尾后，才释放聊天锁并减少代际租约计数。
         let finished = self.leases.get(id).is_some_and(|lease| {
             lease.releasing && lease.operations == 0 && lease.permissions == 0
         });
@@ -1551,6 +1566,7 @@ impl Connection {
         lease.permissions += 1;
         let lease = lease.id.clone();
         let session_id = session_id.unwrap();
+        // 反向请求用新的 ID，回复和取消再通过映射转回发起请求的后端。
         let external = format!("aas-permission:{}", Uuid::new_v4());
         self.permissions.insert(
             external.clone(),

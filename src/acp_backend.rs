@@ -309,6 +309,7 @@ impl PendingRequest {
             if state.pending.remove(&self.id).is_none() {
                 return false;
             }
+            // 取消后仍可能收到成功响应，保留回调以清理后端已创建的资源。
             let mut displaced = None;
             if let Some(on_late_result) = self.on_late_result.take() {
                 if state.late_results.len() >= MAX_LATE_REPLIES {

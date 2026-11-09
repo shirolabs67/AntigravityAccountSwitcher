@@ -205,6 +205,7 @@ pub fn broker(path: &Path) -> Result<BrokerConfig, PeerError> {
         if !ports.insert(mcp_port) {
             return Err(invalid("mcp_port"));
         }
+        // 主动换号需要为该实例显式授权，旧配置默认禁用。
         let allow_account_switch = match row.get("allowAccountSwitch") {
             Some(value) => value
                 .as_bool()

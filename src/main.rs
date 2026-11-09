@@ -142,6 +142,7 @@ async fn run_worker(path: &Path, stop: CancellationToken) -> Result<(), PeerErro
             },
         };
         if request.method == "worker/probe" && request.params["groupId"].is_string() {
+            // 额度探测独立运行，避免阻塞已获租约的 ACP 流。
             let runtime = runtime.clone();
             let peer = peer.clone();
             probes.spawn(async move {
