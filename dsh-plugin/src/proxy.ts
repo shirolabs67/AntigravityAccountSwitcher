@@ -74,6 +74,7 @@ export function proxyArgv(config: ProxyConfig, localBridgePort: number): string[
     '-o', 'IdentitiesOnly=yes',
     '-o', 'IdentityAgent=none',
     '-o', 'PreferredAuthentications=publickey',
+    // SSH 须成功建立远端回环转发，否则 agy 无法回调 DSH 的 MCP 桥。
     '-o', 'ExitOnForwardFailure=yes',
     '-o', 'ConnectTimeout=10',
     '-o', 'ServerAliveInterval=15',
@@ -100,6 +101,7 @@ export function assertProxyCapability(result: Record<string, unknown> | undefine
 }
 
 export async function acquireProxyTurn(proc: AcpProcess, chatKey: string, model: string, switchAccount: boolean): Promise<ProxyLease> {
+  // 主动换号能力由路由器根据当前连接的 SSH 身份声明。
   if (switchAccount && extension(proc.initializeResult?._meta)?.switchAccount !== true) {
     throw new LlmError('The Account Switcher did not enable account switching for this SSH identity.', 'PROXY_ACCOUNT_SWITCH_DISABLED')
   }
@@ -133,6 +135,7 @@ export function proxyNativeSessionId(meta: unknown): string | undefined {
 }
 
 export function proxyRouteKey(lease: ProxyLease): string {
+  // 租约 ID 每轮更新。会话能否跨轮复用取决于路由状态、账号和 worker 代际。
   return JSON.stringify([lease.status, lease.accountId, lease.generationId])
 }
 

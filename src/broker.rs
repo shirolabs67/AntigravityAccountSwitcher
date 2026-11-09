@@ -107,6 +107,7 @@ impl RemoteStream {
                 };
                 (listener, frame)
             };
+            // 监听器可能在回调中关闭这条流，因此在锁外调用。
             listener(frame);
         }
     }
@@ -250,6 +251,7 @@ impl WorkerDirectory for Workers {
     async fn open(&self, account_id: &str) -> Result<Arc<dyn WorkerStream>, PeerError> {
         let worker = self.get(account_id)?;
         let id = Uuid::new_v4().to_string();
+        // 先登记流，确保早于 worker/open 响应抵达的帧也能找到它。
         let mut opening = {
             let mut streams = worker.streams.lock().unwrap();
             if streams.len() >= MAX_STREAMS {
@@ -295,6 +297,7 @@ impl Broker {
                 _ => return,
             }
         };
+        // TLS 验证证书链后，由叶证书指纹确定此连接的角色和实例或账号归属。
         let Some(identity) = stream
             .get_ref()
             .1

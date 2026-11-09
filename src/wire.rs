@@ -213,6 +213,7 @@ impl Peer {
                 if !params.is_object() {
                     return Err(invalid_frame());
                 }
+                // 预算随消息保留到处理结束。队列满时关闭连接，避免阻塞后续响应的读取。
                 let message = Incoming {
                     method,
                     params,

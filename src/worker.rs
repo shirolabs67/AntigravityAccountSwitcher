@@ -99,6 +99,7 @@ fn parse_quota(output: &[u8], group_id: &str) -> Result<Quota, WorkerError> {
             WorkerError::QuotaUnavailable
         });
     }
+    // 只接受目标模型组的完整额度，字段缺失应归为探测失败。
     let groups = value["command"]["data"]["groups"]
         .as_array()
         .ok_or(WorkerError::QuotaInvalid)?;
@@ -342,6 +343,7 @@ impl AccountWorker {
             drop(queued);
             on_close();
 
+            // 关闭 stdin 后继续排空输出，给子进程留出自行退出的时间。
             let wait_for_cleanup = async {
                 let drain_pipes = async {
                     let _ = tokio::join!(drain(&mut output), drain(&mut diagnostics));
@@ -370,6 +372,7 @@ impl AccountWorker {
         if frame["jsonrpc"] != "2.0" {
             return Err(WorkerError::StreamInvalid);
         }
+        // DSH 提供的路径属于客户端，远端会话使用 worker 配置的工作目录。
         if matches!(
             frame["method"].as_str(),
             Some("session/new" | "session/load" | "session/resume")

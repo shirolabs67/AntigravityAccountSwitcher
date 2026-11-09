@@ -338,6 +338,7 @@ export class AntigravityRuntime {
       if (conv.failedSubmission !== undefined) {
         this.dropTurn(conv, 'The submitted proxy turn cannot be resumed.')
         if (conv.process !== undefined) await this.releaseTurn(conv, conv.process)
+        // 已提交的输入可能执行过工具。同一输入重试时沿用原错误，避免重复执行。
         if (conv.failedSubmission.input === inputKey) throw conv.failedSubmission.error
         conv.failedSubmission = undefined
       }
@@ -376,6 +377,7 @@ export class AntigravityRuntime {
           yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'Request aborted', code: 'ABORTED' } } }
           return
         }
+        // 配置触发的换号只在首个主会话新轮次尝试一次，发起申请时即清除标志。
         const switchArmed = this.switchAccountOnNextTurn && purpose === MAIN_PURPOSE
         if (switchArmed) this.switchAccountOnNextTurn = false
         conv.proxyLease = await acquireProxyTurn(proc, key, options.model, switchRequested || switchArmed)
@@ -398,6 +400,7 @@ export class AntigravityRuntime {
         : LOCKED_REPLAY_BUDGET_BYTES
       let blocks: AcpPromptBlock[]
       if (exhausted) {
+        // 路由器直接回复额度提示。后续额度恢复时从 DSH 历史重建会话。
         blocks = [{ type: 'text', text: 'Return the configured quota notice.' }]
         conv.dirty = true
       } else if (plan.rebuild) {
@@ -429,6 +432,7 @@ export class AntigravityRuntime {
     } finally {
       try {
         if (conv !== undefined) {
+          // 工具挂起后的回填和续写仍属于原 DSH 轮次，继续沿用原租约。
           if (proc !== undefined && conv.turn === undefined) await this.releaseTurn(conv, proc)
           conv.opening = false
           await this.afterStep(conv)
@@ -647,6 +651,7 @@ export class AntigravityRuntime {
         },
         onPermission: request => this.answerPermission(conv, request),
       }, 120_000)
+      // 代理模式下，ACP 请求使用路由器分配的会话 ID，MCP 回调携带 agy 的原生会话 ID。
       const nativeSessionId = this.usesProxy ? proxyNativeSessionId(result._meta) : result.sessionId
       if (this.usesProxy && !exhausted && nativeSessionId === undefined) {
         void proc.closeSession(result.sessionId)
@@ -842,6 +847,7 @@ export class AntigravityRuntime {
   private async releaseTurn(conv: Conversation, proc: AcpProcess): Promise<void> {
     const lease = conv.proxyLease
     conv.proxyLease = undefined
+    // 租约属于原连接。断线时由路由器清理。
     if (lease === undefined || !proc.alive) return
     try {
       await releaseProxyTurn(proc, lease)
