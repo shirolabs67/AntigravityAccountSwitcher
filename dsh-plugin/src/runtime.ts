@@ -395,9 +395,9 @@ export class AntigravityRuntime {
         await this.openSession(conv, split.system, tools, proc)
       }
       if (!exhausted) await this.select(conv, proc, options.model, effort)
-      const replayBudget = this.preflight?.unlock.status === 'unlocked'
-        ? UNLOCKED_REPLAY_BUDGET_BYTES
-        : LOCKED_REPLAY_BUDGET_BYTES
+      const unlocked = this.preflight?.unlock.status === 'unlocked'
+        || this.configuredContextWindow() >= UNLOCKED_CONTEXT_WINDOW
+      const replayBudget = unlocked ? UNLOCKED_REPLAY_BUDGET_BYTES : LOCKED_REPLAY_BUDGET_BYTES
       let blocks: AcpPromptBlock[]
       if (exhausted) {
         // 路由器直接回复额度提示。后续额度恢复时从 DSH 历史重建会话。
@@ -957,10 +957,19 @@ export class AntigravityRuntime {
     const toolDelta = consumeToolDelta(conv, tools)
     const suffix = [toolDelta, extraText].filter(Boolean).join('\n\n')
     const pending = [...turn.pendingCalls.values()]
+    const terminal = turn.events.find(e => e.kind === 'done' || e.kind === 'error')
+    if (terminal?.kind === 'error') {
+      this.dropTurn(conv, terminal.error.message)
+      throw mapError(terminal.error)
+    }
+    if (!turn.finished && terminal === undefined && pending.some(call => call.disconnected === true)) {
+      return false
+    }
     turn.pendingCalls.clear()
-    if (turn.finished || !this.isTurnLive(turn)) {
+    if (turn.finished || terminal?.kind === 'done') {
       // The agent ended its turn while the harness ran the tools: hand the results over as new input.
       const transcript = renderTranscript(pending.map(call => results.get(call.id) as RequestMessage))
+      turn.abandon('The previous ACP turn ended before tool results arrived.')
       // The old turn is over: its reported identities do not carry into the continuation.
       conv.reportedToolCalls.clear()
       conv.turn = new AcpTurn(this.nextTurnTag(messages))
@@ -977,11 +986,6 @@ export class AntigravityRuntime {
       call.result.resolve(result)
     }
     return true
-  }
-
-  private isTurnLive(turn: AcpTurn): boolean {
-    const head = turn.events.peek()
-    return head?.kind !== 'done' && head?.kind !== 'error'
   }
 
   private async toBridgeResult(content: readonly ContentBlock[], isError: boolean): Promise<BridgeToolResult> {
@@ -1021,7 +1025,7 @@ export class AntigravityRuntime {
   private async afterStep(conv: Conversation): Promise<void> {
     conv.lastUsed = Date.now()
     const idle = this.isIdle(conv)
-    if (idle && conv.failedSubmission === undefined && (conv.purpose !== MAIN_PURPOSE || conv.key.startsWith('anon-'))) {
+    if (idle && ((conv.failedSubmission === undefined && conv.purpose !== MAIN_PURPOSE) || conv.key.startsWith('anon-'))) {
       await this.resetSession(conv)
       this.conversations.delete(conv.key)
       return
@@ -1056,7 +1060,7 @@ export class AntigravityRuntime {
       const callId = typeof request.arguments.call_id === 'string' ? request.arguments.call_id : ''
       const call = turn.calls.get(callId)
       if (call === undefined) return { content: [{ type: 'text', text: `Unknown harness call id ${callId}.` }], isError: true }
-      turn.relaying = false
+      turn.clearRelay(callId)
       return this.awaitCall(turn, call, request.signal)
     }
     if (request.name === CALL_TOOL_NAME) {
@@ -1081,22 +1085,31 @@ export class AntigravityRuntime {
 
   private async awaitCall(turn: AcpTurn, call: ParkedCall, signal: AbortSignal): Promise<BridgeToolResult> {
     let timer: ReturnType<typeof setTimeout> | undefined
+    call.disconnected = false
     const relayAfterMs = this.host.relayAfterMs ?? this.host.config.relayAfterMs ?? DEFAULT_RELAY_AFTER_MS
     const relay = new Promise<'relay'>(resolve => { timer = setTimeout(() => resolve('relay'), relayAfterMs) })
+    let onAbort: (() => void) | undefined
     const aborted = new Promise<'aborted'>(resolve => {
       if (signal.aborted) resolve('aborted')
-      else signal.addEventListener('abort', () => resolve('aborted'), { once: true })
+      else {
+        onAbort = () => resolve('aborted')
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
     })
     try {
       const outcome = await Promise.race([call.result.promise, relay, aborted])
       if (outcome === 'relay') {
-        turn.relaying = true
+        turn.startRelay(call.id)
         return relayNotice(call)
       }
-      if (outcome === 'aborted') return { content: [{ type: 'text', text: 'The tool call was cancelled.' }], isError: true }
+      if (outcome === 'aborted') {
+        call.disconnected = true
+        return { content: [{ type: 'text', text: 'The tool call was cancelled.' }], isError: true }
+      }
       return outcome
     } finally {
       if (timer !== undefined) clearTimeout(timer)
+      if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
     }
   }
 

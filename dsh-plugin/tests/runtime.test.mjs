@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url'
 import { AntigravityRuntime, compactBridgeTool, DEFAULT_RELAY_AFTER_MS, MAX_EAGER_BRIDGE_TOOL_BYTES } from '../lib/runtime.js'
 import { AntigravityAdapter } from '../lib/adapter.js'
 import { Config } from '../lib/config.js'
-import { toTokenUsage } from '../lib/conversation.js'
-import { EMPTY_INPUT_CONTINUATION, LOCKED_REPLAY_BUDGET_BYTES } from '../lib/history.js'
+import { AcpTurn, classifyOutputLimitNotice, pumpStep, toTokenUsage } from '../lib/conversation.js'
+import { EMPTY_INPUT_CONTINUATION, LOCKED_REPLAY_BUDGET_BYTES, UNLOCKED_REPLAY_BUDGET_BYTES } from '../lib/history.js'
 import { assertSupportedAgyVersion, checkUnlock, prepareHome, resolveAgyBinary, resolvePythonArgv, syncOAuthToken } from '../lib/preflight.js'
 import { sessionDbPath } from '../lib/usage-db.js'
 
@@ -1032,4 +1032,129 @@ test('multi-turn tool calls mint distinct session-wide ToolCallIds so PTC subCal
   }
   assert.equal(seenCallIds.size, 3)
   assert.equal(seenPtcSubCallIds.size, 3)
+})
+
+test('classifyOutputLimitNotice handles trailing punctuation and rejects unrelated prose', () => {
+  assert.equal(classifyOutputLimitNotice('Your previous response was cut off because it exceeded the output token limit.'), 'drop')
+  assert.equal(classifyOutputLimitNotice('Your previous response was cut off because it exceeded the output token limit!'), 'drop')
+  assert.equal(classifyOutputLimitNotice('Please continue from where you left off, keeping your response shorter!'), 'drop')
+  assert.equal(classifyOutputLimitNotice('Your previous response was cut off because it exceeded the output token limit. Retries remaining: 2'), 'drop')
+  assert.equal(classifyOutputLimitNotice('Your previous response was cut off'), 'hold')
+  assert.equal(classifyOutputLimitNotice('Normal reply about token limits.'), 'emit')
+})
+
+test('AcpTurn flushes buffered relay text on direct end_turn and preserves buffering while a second relay remains active', async () => {
+  const turn = new AcpTurn('relaytest001')
+  turn.startRelay('c1')
+  turn.startRelay('c2')
+  turn.onUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'first-' } })
+  turn.clearRelay('c1')
+  assert.equal(turn.relaying, true, 'second relay c2 should keep buffering active')
+  turn.onUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'second' } })
+  assert.equal(turn.events.peek(), undefined, 'output stays buffered while relayed call c2 is active')
+
+  turn.events.push({ kind: 'done', result: { stopReason: 'end_turn' } })
+  const chunks = await collect(pumpStep(turn, {
+    maxContinuations: 0,
+    continuePrompt: async () => ({ stopReason: 'end_turn' }),
+    cancel: () => undefined,
+    recordUsage: () => undefined,
+    mapError: e => e instanceof Error ? e : new Error(String(e)),
+  }, undefined))
+  assert.equal(finishOf(chunks).reason.kind, 'stop')
+  assert.equal(textOf(chunks), 'first-second')
+})
+
+test('AcpTurn discards relay buffer when all relayed calls explicitly clear via dsh_await_result', async () => {
+  const turn = new AcpTurn('relaytest002')
+  turn.startRelay('c1')
+  turn.onUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'intermediate chatter' } })
+  turn.clearRelay('c1')
+  assert.equal(turn.relaying, false)
+  turn.onUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'real answer' } })
+  turn.events.push({ kind: 'done', result: { stopReason: 'end_turn' } })
+  const chunks = await collect(pumpStep(turn, {
+    maxContinuations: 0,
+    continuePrompt: async () => ({ stopReason: 'end_turn' }),
+    cancel: () => undefined,
+    recordUsage: () => undefined,
+    mapError: e => e instanceof Error ? e : new Error(String(e)),
+  }, undefined))
+  assert.equal(textOf(chunks), 'real answer')
+})
+
+test('deliverResults rebuilds instead of hanging when a parked await aborts or a queued error follows text', async () => {
+  const { runtime, adapter, prompts } = makeRuntime()
+  const base = { provider: 'antigravity', model: 'gemini-4-argon', sessionId: 'S-deliver-edge', tools: [bash] }
+  const step1 = await collect(adapter.stream({ ...base, messages: [sys, user('u1', 'CALL bash {"command":"slow"}')] }))
+  const [call] = callsOf(step1)
+
+  const conv = [...runtime.conversations.values()][0]
+  assert.ok(conv?.turn)
+  conv.turn.startRelay(call.id)
+  const controller = new AbortController()
+  const awaitPromise = runtime.callTool({
+    tenantKey: conv.tenantKey,
+    conversationId: conv.nativeSessionId,
+    name: 'dsh_await_result',
+    arguments: { call_id: call.id },
+    signal: controller.signal,
+  })
+  controller.abort()
+  await awaitPromise
+  assert.equal(conv.turn.pendingCalls.get(call.id)?.disconnected, true)
+
+  const step2 = await collect(adapter.stream({
+    ...base,
+    messages: [sys, user('u1', 'x'), assistantFrom('a1', step1), tool('t1', call.id, 'late-res'), user('u2', 'recover')],
+  }))
+  assert.equal(finishOf(step2).reason.kind, 'stop')
+  assert.notEqual(prompts().at(-1).session, prompts()[0].session, 'disconnected parked call triggers fresh session rebuild')
+
+  // Queued error behind text must be surfaced by deliverResults instead of treated as a live turn.
+  const errTurn = new AcpTurn('errturn00001')
+  errTurn.pendingCalls.set('c2', { id: 'c2', name: 'bash', argumentsJson: '{}', result: { resolve: () => undefined, reject: () => undefined } })
+  errTurn.events.push({ kind: 'text', text: 'partial' })
+  errTurn.events.push({ kind: 'error', error: new Error('queued transport failure') })
+  const fakeConv = {
+    key: 'S-err-queued',
+    purpose: 'main',
+    reportedToolCalls: new Map(),
+    knownTools: new Map(),
+    toolNames: new Set(),
+    issuedIds: new Set(),
+    turn: errTurn,
+    dirty: false,
+    opening: false,
+    usageCursor: -1,
+    lastUsed: Date.now(),
+    configOptions: [],
+    advertisedTools: [],
+    advertisedToolNames: new Set(),
+  }
+  await assert.rejects(
+    () => runtime.deliverResults(fakeConv, [tool('t2', 'c2', 'ok')], {}, []),
+    /queued transport failure/,
+  )
+  assert.equal(fakeConv.dirty, true)
+  assert.equal(fakeConv.turn, undefined)
+})
+
+test('configured 1M contextWindow uses UNLOCKED_REPLAY_BUDGET_BYTES without requiring preflight unlock', async () => {
+  const { adapter, prompts } = makeRuntime({ config: { contextWindow: 1_048_576 } })
+  const base = { provider: 'antigravity', model: 'gemini-4-argon', sessionId: 'S-1m-budget' }
+  await collect(adapter.stream({ ...base, messages: [sys, user('u0', 'bootstrap')] }))
+  const chunk = 'KEEP-1M-HISTORY '.repeat(12_000) // ~192KB > LOCKED_REPLAY_BUDGET_BYTES (160KB)
+  assert.ok(chunk.length > LOCKED_REPLAY_BUDGET_BYTES)
+  assert.ok(chunk.length < UNLOCKED_REPLAY_BUDGET_BYTES)
+  // Rewrite history (`u0` replaced by `u1`) to force `<dsh_history>` transcript replay.
+  const history = [
+    sys,
+    user('u1', `START-MARKER ${chunk}`),
+    assistant('a1', [{ type: 'text', text: 'ack' }]),
+    user('u2', 'latest question'),
+  ]
+  await collect(adapter.stream({ ...base, messages: history }))
+  const rebuilt = prompts().at(-1)
+  assert.match(rebuilt.text, /START-MARKER/, '1M configured contextWindow preserves history beyond LOCKED_REPLAY_BUDGET_BYTES')
 })

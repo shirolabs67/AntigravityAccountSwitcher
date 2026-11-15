@@ -45,9 +45,10 @@ export function classifyOutputLimitNotice(raw: string): 'drop' | 'hold' | 'emit'
   if (retry.length > 0 && !/^retries remaining:\s*\d*$/i.test(retry)) return 'emit'
   if (stripped.length === 0) return /^retries remaining:\s*\d+$/i.test(text) ? 'drop' : 'emit'
   const full = `${OUTPUT_LIMIT_HEAD} ${OUTPUT_LIMIT_TAIL}`
-  if (stripped === full || stripped === OUTPUT_LIMIT_HEAD || stripped === OUTPUT_LIMIT_TAIL) return 'drop'
-  if (full.startsWith(stripped) && stripped.startsWith('your previous')) return 'hold'
-  if (OUTPUT_LIMIT_TAIL.startsWith(stripped) && stripped.startsWith('please continue from where you left off')) return 'hold'
+  const normalized = stripped.replace(/[.!?]+(?=\s|$)/g, '').trim()
+  if (normalized === full || normalized === OUTPUT_LIMIT_HEAD || normalized === OUTPUT_LIMIT_TAIL) return 'drop'
+  if (full.startsWith(normalized) && normalized.startsWith('your previous')) return 'hold'
+  if (OUTPUT_LIMIT_TAIL.startsWith(normalized) && normalized.startsWith('please continue from where you left off')) return 'hold'
   if ('retries remaining:'.startsWith(text) && text.startsWith('retries')) return 'hold'
   return 'emit'
 }
@@ -86,6 +87,8 @@ export interface ParkedCall {
   readonly name: string
   readonly argumentsJson: string
   readonly result: Deferred<BridgeToolResult>
+  /** Set when the agent's MCP HTTP call disconnected before receiving a result or relay notice. */
+  disconnected?: boolean
 }
 
 /** Event observed during one ACP turn. */
@@ -111,8 +114,14 @@ export class AcpTurn {
   pendingPrompt: Promise<AcpPromptResult> | undefined
   /** The agent ended the prompt. */
   finished = false
-  /** A parked call was answered with a still-running notice and the agent has not resumed waiting yet. */
-  relaying = false
+  /** Parked calls answered with a still-running notice that the agent has not resumed waiting on yet. */
+  readonly relayedCalls = new Set<string>()
+  /** Output buffered while waiting for the agent to call `dsh_await_result`, flushed if the turn ends directly. */
+  private relayedBuffer: TurnEvent[] = []
+  /** Whether any relayed call is still waiting for the agent to resume. */
+  get relaying(): boolean {
+    return this.relayedCalls.size > 0
+  }
   /** The turn produced visible text or a tool call. */
   produced = false
   /** Agent-side transport retry notices dropped from the output. */
@@ -165,6 +174,26 @@ export class AcpTurn {
     return call
   }
 
+  /** Mark one call as relayed so transient pre-await text is held until `dsh_await_result` arrives. */
+  startRelay(callId: string): void {
+    this.relayedCalls.add(callId)
+  }
+
+  /** Clear relay suppression when the agent calls `dsh_await_result` for `callId`. */
+  clearRelay(callId: string): void {
+    this.relayedCalls.delete(callId)
+    if (this.relayedCalls.size === 0) this.relayedBuffer = []
+  }
+
+  /** Flush buffered output back into the live event queue if the turn ends without `dsh_await_result`. */
+  flushRelayedBuffer(): boolean {
+    this.relayedCalls.clear()
+    if (this.relayedBuffer.length === 0) return false
+    for (const event of this.relayedBuffer) this.events.push(event)
+    this.relayedBuffer = []
+    return true
+  }
+
   /**
    * Route one ACP session update into the event queue.
    * @param update - the agent notification.
@@ -176,10 +205,15 @@ export class AcpTurn {
       return
     }
     if (update.sessionUpdate === 'agent_thought_chunk') {
-      const held = this.recoverNoticeHold()
-      if (held.length > 0 && !this.relaying) this.events.push({ kind: 'text', text: held })
-      if (text.length > 0 && !this.relaying) this.events.push({ kind: 'thought', text })
+      const held = this.recoverNoticeHold(true)
+      if (held.length > 0) this.emitOrBuffer({ kind: 'text', text: held })
+      if (text.length > 0) this.emitOrBuffer({ kind: 'thought', text })
     }
+  }
+
+  private emitOrBuffer(event: Extract<TurnEvent, { kind: 'text' | 'thought' }>): void {
+    if (this.relaying) this.relayedBuffer.push(event)
+    else this.events.push(event)
   }
 
   /**
@@ -198,15 +232,16 @@ export class AcpTurn {
       this.retryNotices++
       return
     }
-    if (!this.relaying) this.events.push({ kind: 'text', text: combined })
+    this.emitOrBuffer({ kind: 'text', text: combined })
   }
 
   /**
    * Release a held prefix once the message stream moves on.
    * A finished output-cap notice is counted and discarded; anything else is returned for emission.
+   * @param includeWhenRelaying - when true, return held non-notice text even during relay buffering.
    * @returns model text to show, or an empty string.
    */
-  recoverNoticeHold(): string {
+  recoverNoticeHold(includeWhenRelaying = false): string {
     if (this.noticeHold.length === 0) return ''
     const held = this.noticeHold
     this.noticeHold = ''
@@ -214,7 +249,7 @@ export class AcpTurn {
       this.retryNotices++
       return ''
     }
-    return this.relaying ? '' : held
+    return this.relaying && !includeWhenRelaying ? '' : held
   }
 
   /**
@@ -222,6 +257,8 @@ export class AcpTurn {
    * @param reason - message delivered to the agent.
    */
   abandon(reason: string): void {
+    this.relayedCalls.clear()
+    this.relayedBuffer = []
     for (const call of this.calls.values()) {
       call.result.resolve({ content: [{ type: 'text', text: reason }], isError: true })
     }
@@ -366,6 +403,11 @@ export async function * pumpStep(turn: AcpTurn, host: PumpHost, signal: AbortSig
           )
           break
         }
+        if (turn.relayedCalls.size > 0 && turn.flushRelayedBuffer()) {
+          turn.events.push(event)
+          break
+        }
+        turn.relayedCalls.clear()
         turn.finished = true
         yield * close()
         const calls = turn.toolSteps + turn.continuations + 1

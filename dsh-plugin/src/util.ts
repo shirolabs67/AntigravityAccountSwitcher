@@ -71,6 +71,15 @@ export class AsyncQueue<T> {
   }
 
   /**
+   * Find the first queued item matching a predicate without removing it.
+   * @param predicate - item matcher.
+   * @returns the first matching item, or undefined.
+   */
+  find(predicate: (item: T) => boolean): T | undefined {
+    return this.items.find(predicate)
+  }
+
+  /**
    * Wait until an item is available.
    * @param signal - aborts the wait.
    * @param timeoutMs - resolve false after this delay.
